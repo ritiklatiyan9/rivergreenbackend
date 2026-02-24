@@ -1,0 +1,34 @@
+import express from 'express';
+const router = express.Router();
+
+import authRoutes from './auth.routes.js';
+import uploadRoutes from './upload.routes.js';
+import adminRoutes from './admin.routes.js';
+import siteRoutes from './site.routes.js';
+import teamRoutes from './team.routes.js';
+import userCategoryRoutes from './userCategory.routes.js';
+import callRoutes from './call.routes.js';
+import followupRoutes from './followup.routes.js';
+import leadRoutes from './lead.routes.js';
+import colonyMapRoutes from './colonyMap.routes.js';
+import plotBookingRoutes from './plotBooking.routes.js';
+import paymentRoutes from './payment.routes.js';
+import clientRoutes from './client.routes.js';
+import clientActivityRoutes from './clientActivity.routes.js';
+
+router.use('/auth', authRoutes);
+router.use('/upload', uploadRoutes);
+router.use('/admin', adminRoutes);
+router.use('/site', siteRoutes);
+router.use('/teams', teamRoutes);
+router.use('/site/user-categories', userCategoryRoutes);
+router.use('/calls', callRoutes);
+router.use('/followups', followupRoutes);
+router.use('/leads', leadRoutes);
+router.use('/colony-maps', colonyMapRoutes);
+router.use('/bookings', plotBookingRoutes);
+router.use('/payments', paymentRoutes);
+router.use('/clients', clientRoutes);
+router.use('/activities', clientActivityRoutes);
+
+export default router;
