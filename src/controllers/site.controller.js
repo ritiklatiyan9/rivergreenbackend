@@ -194,9 +194,15 @@ export const updateSiteUser = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: 'User not found in your site' });
   }
 
-  // Admin cannot edit themselves or other admins via this endpoint
-  if (targetUser.role === 'ADMIN' || targetUser.role === 'OWNER') {
-    return res.status(403).json({ success: false, message: 'Cannot modify this user' });
+  // Check authorization: allow if self-edit, block if trying to edit OTHER admins/owners
+  const isSelfEdit = String(targetUser.id) === String(req.user.id);
+  if ((targetUser.role === 'ADMIN' || targetUser.role === 'OWNER') && !isSelfEdit) {
+    return res.status(403).json({ success: false, message: 'Cannot modify other admin accounts' });
+  }
+  
+  // If it's a non-admin trying to edit an admin (shouldn't happen, but just in case)
+  if (adminUser.role !== 'ADMIN' && adminUser.role !== 'OWNER' && (targetUser.role === 'ADMIN' || targetUser.role === 'OWNER')) {
+    return res.status(403).json({ success: false, message: 'Insufficient permissions' });
   }
 
   const updateData = {};
