@@ -11,7 +11,8 @@ const app = express();
 app.use(helmet());
 app.use(morgan('combined'));
 app.use(cors({
-  origin: '*',
+  origin: (origin, callback) => callback(null, origin || true),
+  credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
