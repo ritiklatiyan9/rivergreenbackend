@@ -415,3 +415,178 @@ export const getFollowupCompliance = asyncHandler(async (req, res) => {
     const compliance = await callModel.getFollowupCompliance(dbUser.site_id, assignedTo, pool);
     res.json({ success: true, compliance });
 });
+
+// ============================================================
+// LEADS DIALER — All leads with phone & last call info
+// ============================================================
+export const getLeadsForDialer = asyncHandler(async (req, res) => {
+    const dbUser = await userModel.findById(req.user.id, pool);
+    if (!dbUser || !dbUser.site_id) {
+        return res.status(404).json({ success: false, message: 'No site assigned' });
+    }
+
+    const scope = getScopeFilters(req.user, dbUser);
+    const { page, limit, search, status } = req.query;
+
+    const result = await callModel.getLeadsForDialer({
+        siteId: scope.siteId,
+        assignedTo: scope.assignedTo,
+        teamId: scope.teamId,
+        search,
+        status,
+        page: parseInt(page) || 1,
+        limit: parseInt(limit) || 25,
+    }, pool);
+
+    res.json({ success: true, ...result });
+});
+
+// ============================================================
+// QUICK LOG — Agent taps call icon, system captures start time
+// ============================================================
+export const quickLogCall = asyncHandler(async (req, res) => {
+    const { lead_id, call_source } = req.body;
+
+    if (!lead_id) {
+        return res.status(400).json({ success: false, message: 'Lead is required' });
+    }
+
+    const siteId = await getSiteId(req.user.id);
+    if (!siteId) {
+        return res.status(404).json({ success: false, message: 'No site assigned' });
+    }
+
+    // Get lead phone number
+    const leadResult = await pool.query('SELECT phone FROM leads WHERE id = $1', [lead_id]);
+    if (!leadResult.rows[0]) {
+        return res.status(404).json({ success: false, message: 'Lead not found' });
+    }
+
+    const call = await callModel.quickLog({
+        site_id: siteId,
+        lead_id,
+        assigned_to: req.user.id,
+        created_by: req.user.id,
+        call_type: 'OUTGOING',
+        call_start: new Date().toISOString(),
+        call_status: 'ACTIVE',
+        call_source: call_source || 'WEB',
+        phone_number_dialed: leadResult.rows[0].phone,
+        is_manual_log: false,
+    }, pool);
+
+    // Mark lead as CONTACTED if NEW
+    const lead = await pool.query('SELECT status FROM leads WHERE id = $1', [lead_id]);
+    if (lead.rows[0]?.status === 'NEW') {
+        await pool.query('UPDATE leads SET status = $1, updated_at = NOW() WHERE id = $2', ['CONTACTED', lead_id]);
+    }
+
+    bustCache('cache:*:/api/calls*');
+
+    res.status(201).json({
+        success: true,
+        call,
+        phone: leadResult.rows[0].phone,
+    });
+});
+
+// ============================================================
+// END CALL — End an active call session
+// ============================================================
+export const endCallSession = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { outcome_id, next_action, customer_notes } = req.body;
+
+    const existing = await callModel.findById(id, pool);
+    if (!existing) {
+        return res.status(404).json({ success: false, message: 'Call not found' });
+    }
+
+    if (existing.assigned_to !== req.user.id && !['ADMIN', 'OWNER'].includes(req.user.role)) {
+        return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
+    const callEnd = new Date();
+    const callStart = new Date(existing.call_start);
+    const durationSeconds = Math.max(0, Math.floor((callEnd - callStart) / 1000));
+
+    const updatedCall = await callModel.endCall(id, {
+        call_end: callEnd.toISOString(),
+        duration_seconds: durationSeconds,
+        outcome_id: outcome_id || null,
+        next_action: next_action || 'NONE',
+        customer_notes: customer_notes || null,
+        call_status: 'COMPLETED',
+    }, pool);
+
+    bustCache('cache:*:/api/calls*');
+
+    res.json({ success: true, call: updatedCall });
+});
+
+// ============================================================
+// AGENT CALL DETAILS — Full call history for an agent
+// ============================================================
+export const getAgentCallDetails = asyncHandler(async (req, res) => {
+    const dbUser = await userModel.findById(req.user.id, pool);
+    if (!dbUser || !dbUser.site_id) {
+        return res.status(404).json({ success: false, message: 'No site assigned' });
+    }
+
+    const { agent_id } = req.params;
+    const { page, limit, date_from, date_to } = req.query;
+
+    // Agents can only see own data
+    if (req.user.role === 'AGENT' && agent_id !== req.user.id) {
+        return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
+    const result = await callModel.getAgentCallDetails({
+        siteId: dbUser.site_id,
+        agentId: agent_id,
+        dateFrom: date_from,
+        dateTo: date_to,
+        page: parseInt(page) || 1,
+        limit: parseInt(limit) || 20,
+    }, pool);
+
+    res.json({ success: true, ...result });
+});
+
+// ============================================================
+// ADVANCED ANALYTICS — Hourly heatmap, peak hours, source breakdown
+// ============================================================
+export const getAdvancedAnalytics = asyncHandler(async (req, res) => {
+    const dbUser = await userModel.findById(req.user.id, pool);
+    if (!dbUser || !dbUser.site_id) {
+        return res.status(404).json({ success: false, message: 'No site assigned' });
+    }
+
+    const scope = getScopeFilters(req.user, dbUser);
+    const { date_from, date_to, agent_id, team_id } = req.query;
+
+    // Build cache key
+    const cacheKey = `analytics:advanced:${dbUser.site_id}:${agent_id || 'all'}:${team_id || 'all'}:${date_from || 'all'}:${date_to || 'all'}`;
+
+    try {
+        const cached = await redisClient.get(cacheKey);
+        if (cached) {
+            return res.json({ success: true, ...JSON.parse(cached), cached: true });
+        }
+    } catch (err) { /* Redis down — skip */ }
+
+    const analytics = await callModel.getAdvancedAnalytics({
+        ...scope,
+        assignedTo: agent_id || scope.assignedTo,
+        teamId: team_id || scope.teamId,
+        dateFrom: date_from,
+        dateTo: date_to,
+    }, pool);
+
+    // Cache for 120 seconds
+    try {
+        await redisClient.setEx(cacheKey, 120, JSON.stringify(analytics));
+    } catch (err) { /* ignore */ }
+
+    res.json({ success: true, ...analytics });
+});

@@ -70,12 +70,14 @@ class UserModel extends MasterModel {
   // Get ALL users in a site (for admin dashboard)
   async findBySite(siteId, pool) {
     const query = `
-      SELECT u.id, u.name, u.email, u.phone, u.profile_photo, u.role, u.sponsor_code, u.sponsor_id, u.parent_id, u.is_active, u.created_at, u.updated_at,
+      SELECT u.id, u.name, u.email, u.phone, u.profile_photo, u.role, u.sponsor_code, u.sponsor_id, u.parent_id, u.team_id, u.is_active, u.created_at, u.updated_at,
         s.name as sponsor_name, s.sponsor_code as sponsor_sponsor_code,
-        p.name as parent_name
+        p.name as parent_name,
+        t.name as team_name
       FROM ${this.tableName} u
       LEFT JOIN ${this.tableName} s ON u.sponsor_id = s.id
       LEFT JOIN ${this.tableName} p ON u.parent_id = p.id
+      LEFT JOIN teams t ON u.team_id = t.id
       WHERE u.site_id = $1
       ORDER BY
         CASE u.role

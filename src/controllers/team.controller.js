@@ -190,6 +190,39 @@ export const moveAgent = asyncHandler(async (req, res) => {
 });
 
 // ============================================================
+// REMOVE TEAM MEMBER
+// ============================================================
+
+export const removeTeamMember = asyncHandler(async (req, res) => {
+  const { id, userId } = req.params;
+
+  const adminUser = await userModel.findById(req.user.id, pool);
+  if (!adminUser || !adminUser.site_id) {
+    return res.status(404).json({ success: false, message: 'No site assigned' });
+  }
+
+  const team = await teamModel.findByIdAndSite(id, adminUser.site_id, pool);
+  if (!team) {
+    return res.status(404).json({ success: false, message: 'Team not found' });
+  }
+
+  const targetUser = await userModel.findById(userId, pool);
+  if (!targetUser || targetUser.site_id !== adminUser.site_id) {
+    return res.status(404).json({ success: false, message: 'User not found in your site' });
+  }
+
+  if (targetUser.team_id !== id) {
+    return res.status(400).json({ success: false, message: 'User is not a member of this team' });
+  }
+
+  await userModel.update(userId, { team_id: null }, pool);
+  bustCache('cache:*:/api/teams*');
+  bustCache('cache:*:/api/site/*');
+
+  res.json({ success: true, message: `${targetUser.name} removed from ${team.name}` });
+});
+
+// ============================================================
 // TEAM PERFORMANCE
 // ============================================================
 

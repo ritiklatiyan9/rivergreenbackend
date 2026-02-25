@@ -182,7 +182,7 @@ export const createSiteUser = asyncHandler(async (req, res) => {
 // Update a user in admin's site
 export const updateSiteUser = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { name, email, password, phone, role, is_active, sponsor_code: sponsorRefCode, profile_photo, category_id, profile_data } = req.body;
+  const { name, email, password, phone, role, is_active, sponsor_code: sponsorRefCode, profile_photo, category_id, profile_data, team_id } = req.body;
 
   const adminUser = await userModel.findById(req.user.id, pool);
   if (!adminUser || !adminUser.site_id) {
@@ -204,6 +204,7 @@ export const updateSiteUser = asyncHandler(async (req, res) => {
   if (phone !== undefined) updateData.phone = phone;
   if (is_active !== undefined) updateData.is_active = is_active;
   if (profile_photo !== undefined) updateData.profile_photo = profile_photo;
+  if (team_id !== undefined) updateData.team_id = team_id || null;
 
   if (email) {
     const existing = await userModel.findByEmail(email, pool);
@@ -248,6 +249,7 @@ export const updateSiteUser = asyncHandler(async (req, res) => {
   }
 
   bustCache('cache:*:/api/site/*');
+  if (team_id !== undefined) bustCache('cache:*:/api/teams*');
   res.json({ success: true, user: sanitizeUser(updated) });
 });
 

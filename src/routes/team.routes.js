@@ -9,6 +9,7 @@ import {
   deleteTeam,
   assignTeamHead,
   moveAgent,
+  removeTeamMember,
   getTeamPerformance,
   setTeamTarget,
   getTeamTargets,
@@ -32,6 +33,9 @@ router.delete('/:id', deleteTeam);
 
 // Assign head
 router.put('/:id/assign-head', assignTeamHead);
+
+// Members
+router.delete('/:id/members/:userId', removeTeamMember);
 
 // Performance
 router.get('/:id/performance', cacheMiddleware(300), getTeamPerformance);

@@ -14,7 +14,8 @@ app.use(cors({
   origin: [
     'http://localhost:5173',
     'http://localhost:5174',
-    'http://localhost:5175',
+    'http://localhost:5175',  
+    'http://localhost:5176',
     'https://adminrivergreen.vercel.app',
     'https://adminrivergreen-git-main-ritik-latiyans-projects.vercel.app',
     'https://adminrivergreen-prb31i4e1-ritik-latiyans-projects.vercel.app',
