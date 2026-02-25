@@ -198,7 +198,7 @@ export const removeTeamMember = asyncHandler(async (req, res) => {
 
   const adminUser = await userModel.findById(req.user.id, pool);
   if (!adminUser || !adminUser.site_id) {
-    return res.status(404).json({ success: false, message: 'No site assigned' });
+    return res.status(404).json({ success: false, message: 'No this site assigned' });
   }
 
   const team = await teamModel.findByIdAndSite(id, adminUser.site_id, pool);
