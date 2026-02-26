@@ -27,7 +27,7 @@ router.put('/:id/approve', checkRole(['ADMIN', 'OWNER']), approveBooking);
 router.put('/:id/reject', checkRole(['ADMIN', 'OWNER']), rejectBooking);
 
 // Stats
-router.get('/stats', checkRole(['ADMIN', 'OWNER', 'TEAM_HEAD']), getBookingStats);
+router.get('/stats', checkRole(['AGENT', 'ADMIN', 'OWNER', 'TEAM_HEAD']), getBookingStats);
 
 // CRUD
 router.post('/', checkRole(['ADMIN', 'OWNER', 'TEAM_HEAD', 'AGENT']), createBooking);

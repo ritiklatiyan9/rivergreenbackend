@@ -31,8 +31,8 @@ router.get('/outcomes', getCallOutcomes);
 // Leads Dialer — all leads with phone + call icon
 router.get('/leads-dialer', getLeadsForDialer);
 
-// Analytics (Team Heads, Admins, Owners only)
-router.get('/analytics', checkRole(['TEAM_HEAD', 'ADMIN', 'OWNER']), getCallAnalytics);
+// Analytics (Agents, Team Heads, Admins, Owners)
+router.get('/analytics', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), getCallAnalytics);
 
 // Advanced Analytics (Admin/Owner only)
 router.get('/advanced-analytics', checkRole(['ADMIN', 'OWNER']), getAdvancedAnalytics);

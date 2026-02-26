@@ -18,8 +18,16 @@ import authMiddleware from '../middlewares/auth.middleware.js';
 import checkRole from '../middlewares/role.middleware.js';
 import { cacheMiddleware } from '../middlewares/cache.middleware.js';
 
-// All team routes require authentication + ADMIN role
-router.use(authMiddleware, checkRole(['ADMIN']));
+// All team routes require authentication
+router.use(authMiddleware);
+
+// Read-only access for agents & team heads (own team)
+router.get('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(300), getTeam);
+router.get('/:id/performance', checkRole(['TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(300), getTeamPerformance);
+router.get('/:id/targets', checkRole(['TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(300), getTeamTargets);
+
+// Admin-only routes below
+router.use(checkRole(['ADMIN']));
 
 // Assign head & move agent
 router.put('/move-agent', moveAgent);
@@ -27,7 +35,6 @@ router.put('/move-agent', moveAgent);
 // Team CRUD
 router.post('/', createTeam);
 router.get('/', cacheMiddleware(300), listTeams);
-router.get('/:id', cacheMiddleware(300), getTeam);
 router.put('/:id', updateTeam);
 router.delete('/:id', deleteTeam);
 
@@ -37,11 +44,7 @@ router.put('/:id/assign-head', assignTeamHead);
 // Members
 router.delete('/:id/members/:userId', removeTeamMember);
 
-// Performance
-router.get('/:id/performance', cacheMiddleware(300), getTeamPerformance);
-
 // Targets
 router.post('/:id/targets', setTeamTarget);
-router.get('/:id/targets', cacheMiddleware(300), getTeamTargets);
 
 export default router;

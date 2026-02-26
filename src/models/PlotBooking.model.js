@@ -110,7 +110,13 @@ class PlotBookingModel extends MasterModel {
   }
 
   // Dashboard stats
-  async getStats(siteId, pool) {
+  async getStats(siteId, pool, bookedBy = null) {
+    const params = [siteId];
+    let whereClause = 'site_id = $1';
+    if (bookedBy) {
+      whereClause += ` AND booked_by = $2`;
+      params.push(bookedBy);
+    }
     const query = `
       SELECT
         COUNT(*) as total_bookings,
@@ -122,9 +128,9 @@ class PlotBookingModel extends MasterModel {
         COALESCE(SUM(booking_amount) FILTER (WHERE status IN ('ACTIVE', 'COMPLETED')), 0) as total_booking_amount,
         COUNT(*) FILTER (WHERE booking_date >= CURRENT_DATE - INTERVAL '30 days') as this_month_bookings
       FROM ${this.tableName}
-      WHERE site_id = $1
+      WHERE ${whereClause}
     `;
-    const result = await pool.query(query, [siteId]);
+    const result = await pool.query(query, params);
     return result.rows[0];
   }
 }

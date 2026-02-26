@@ -205,11 +205,11 @@ class CallModel extends MasterModel {
 
     // Daily call trend (last 30 days)
     const trendQuery = `
-      SELECT DATE(c.call_start) as date, COUNT(*) as count
+      SELECT DATE(c.call_start)::TEXT as date, COUNT(*) as count
       FROM ${this.tableName} c
       LEFT JOIN users u ON c.assigned_to = u.id
       WHERE ${where} AND c.call_start >= CURRENT_DATE - INTERVAL '30 days'
-      GROUP BY DATE(c.call_start)
+      GROUP BY DATE(c.call_start)::TEXT
       ORDER BY date ASC
     `;
     const trendResult = await pool.query(trendQuery, params);

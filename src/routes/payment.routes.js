@@ -17,7 +17,7 @@ import checkRole from '../middlewares/role.middleware.js';
 router.use(authMiddleware);
 
 // Stats
-router.get('/stats', checkRole(['ADMIN', 'OWNER', 'TEAM_HEAD']), getPaymentStats);
+router.get('/stats', checkRole(['AGENT', 'ADMIN', 'OWNER', 'TEAM_HEAD']), getPaymentStats);
 
 // Overdue
 router.get('/overdue', checkRole(['ADMIN', 'OWNER', 'TEAM_HEAD']), getOverduePayments);

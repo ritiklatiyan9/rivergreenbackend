@@ -22,11 +22,17 @@ class PaymentModel extends MasterModel {
   }
 
   // Get all payments for a site with filters
-  async findBySite({ siteId, status, paymentType, dateFrom, dateTo, page = 1, limit = 20 }, pool) {
+  async findBySite({ siteId, assignedTo, status, paymentType, dateFrom, dateTo, page = 1, limit = 20 }, pool) {
     const conditions = ['p.site_id = $1'];
     const params = [siteId];
     let idx = 2;
 
+    // When an agent requests, scope to their own bookings/payments only
+    if (assignedTo) {
+      conditions.push(`(p.booking_id IS NOT NULL AND pb.booked_by = $${idx} OR p.booking_id IS NULL AND p.created_by = $${idx})`);
+      params.push(assignedTo);
+      idx++;
+    }
     if (status) {
       conditions.push(`p.status = $${idx++}`);
       params.push(status);
@@ -47,7 +53,11 @@ class PaymentModel extends MasterModel {
     const where = conditions.join(' AND ');
     const offset = (page - 1) * limit;
 
-    const countQuery = `SELECT COUNT(*) as total FROM ${this.tableName} p WHERE ${where}`;
+    const countQuery = `
+      SELECT COUNT(*) as total FROM ${this.tableName} p
+      LEFT JOIN plot_bookings pb ON p.booking_id = pb.id
+      WHERE ${where}
+    `;
     const countResult = await pool.query(countQuery, params);
     const total = parseInt(countResult.rows[0].total);
 
@@ -115,19 +125,27 @@ class PaymentModel extends MasterModel {
   }
 
   // Dashboard stats
-  async getStats(siteId, pool) {
+  async getStats(siteId, pool, assignedTo = null) {
+    let whereClause = 'p.site_id = $1';
+    const params = [siteId];
+    if (assignedTo) {
+      whereClause += ` AND (p.booking_id IS NOT NULL AND pb.booked_by = $2 OR p.booking_id IS NULL AND p.created_by = $2)`;
+      params.push(assignedTo);
+    }
     const query = `
       SELECT
-        COALESCE(SUM(amount) FILTER (WHERE status = 'COMPLETED'), 0) as total_collected,
-        COALESCE(SUM(amount) FILTER (WHERE status = 'PENDING'), 0) as total_pending,
-        COUNT(*) FILTER (WHERE status = 'PENDING' AND due_date < CURRENT_DATE) as overdue_count,
-        COALESCE(SUM(amount) FILTER (WHERE status = 'PENDING' AND due_date < CURRENT_DATE), 0) as overdue_amount,
-        COALESCE(SUM(amount) FILTER (WHERE status = 'COMPLETED' AND payment_date >= DATE_TRUNC('month', CURRENT_DATE)), 0) as this_month_collected,
-        COUNT(*) FILTER (WHERE status = 'COMPLETED' AND payment_date >= CURRENT_DATE - INTERVAL '7 days') as this_week_payments
-      FROM ${this.tableName}
-      WHERE site_id = $1
+        COALESCE(SUM(p.amount) FILTER (WHERE p.status = 'COMPLETED'), 0) as total_collected,
+        COALESCE(SUM(p.amount) FILTER (WHERE p.status = 'PENDING'), 0) as total_pending,
+        COUNT(*) FILTER (WHERE p.status = 'PENDING' AND p.due_date < CURRENT_DATE) as overdue_count,
+        COALESCE(SUM(p.amount) FILTER (WHERE p.status = 'PENDING' AND p.due_date < CURRENT_DATE), 0) as overdue_amount,
+        COALESCE(SUM(p.amount) FILTER (WHERE p.status = 'COMPLETED' AND p.payment_date >= DATE_TRUNC('month', CURRENT_DATE)), 0) as this_month_collected,
+        COALESCE(SUM(p.amount) FILTER (WHERE p.status = 'COMPLETED' AND p.payment_date >= DATE_TRUNC('month', CURRENT_DATE)), 0) as this_month_amount,
+        COUNT(*) FILTER (WHERE p.status = 'COMPLETED' AND p.payment_date >= CURRENT_DATE - INTERVAL '7 days') as this_week_payments
+      FROM ${this.tableName} p
+      LEFT JOIN plot_bookings pb ON p.booking_id = pb.id
+      WHERE ${whereClause}
     `;
-    const result = await pool.query(query, [siteId]);
+    const result = await pool.query(query, params);
     return result.rows[0];
   }
 }

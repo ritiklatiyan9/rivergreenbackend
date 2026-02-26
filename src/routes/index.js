@@ -15,6 +15,7 @@ import plotBookingRoutes from './plotBooking.routes.js';
 import paymentRoutes from './payment.routes.js';
 import clientRoutes from './client.routes.js';
 import clientActivityRoutes from './clientActivity.routes.js';
+import dashboardRoutes from './dashboard.routes.js';
 
 router.use('/auth', authRoutes);
 router.use('/upload', uploadRoutes);
@@ -30,5 +31,6 @@ router.use('/bookings', plotBookingRoutes);
 router.use('/payments', paymentRoutes);
 router.use('/clients', clientRoutes);
 router.use('/activities', clientActivityRoutes);
+router.use('/dashboard', dashboardRoutes);
 
 export default router;

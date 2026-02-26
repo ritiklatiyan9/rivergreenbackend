@@ -147,14 +147,12 @@ class UserModel extends MasterModel {
   async getSiteStats(siteId, pool) {
     const query = `
       SELECT
-        COUNT(*) FILTER (WHERE role = 'ADMIN') as admin_count,
-        COUNT(*) FILTER (WHERE role = 'TEAM_HEAD') as team_head_count,
-        COUNT(*) FILTER (WHERE role = 'AGENT') as agent_count,
-        COUNT(*) FILTER (WHERE role = 'CLIENT') as client_count,
-        COUNT(*) FILTER (WHERE role = 'VISITOR') as visitor_count,
-        COUNT(*) as total_count
-      FROM ${this.tableName}
-      WHERE site_id = $1
+        (SELECT COUNT(*) FROM ${this.tableName} WHERE site_id = $1 AND role = 'ADMIN') as admin_count,
+        (SELECT COUNT(*) FROM teams WHERE site_id = $1 AND is_active = true) as team_head_count,
+        (SELECT COUNT(*) FROM ${this.tableName} WHERE site_id = $1 AND role = 'AGENT') as agent_count,
+        (SELECT COUNT(*) FROM plot_bookings WHERE site_id = $1 AND status IN ('ACTIVE', 'COMPLETED')) as client_count,
+        (SELECT COUNT(*) FROM leads WHERE site_id = $1 AND status IN ('SITE_VISIT', 'NEGOTIATION', 'BOOKED')) as visitor_count,
+        (SELECT COUNT(*) FROM ${this.tableName} WHERE site_id = $1) as total_count
     `;
     const result = await pool.query(query, [siteId]);
     return result.rows[0];

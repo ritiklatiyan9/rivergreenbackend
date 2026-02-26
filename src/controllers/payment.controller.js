@@ -251,8 +251,12 @@ export const getPayments = asyncHandler(async (req, res) => {
 
   const { page, limit, status, payment_type, date_from, date_to } = req.query;
 
+  // Agents can only see payments from their own bookings
+  const assignedTo = req.user.role === 'AGENT' ? req.user.id : null;
+
   const result = await paymentModel.findBySite({
     siteId,
+    assignedTo,
     status,
     paymentType: payment_type,
     dateFrom: date_from,
@@ -292,7 +296,10 @@ export const getPaymentStats = asyncHandler(async (req, res) => {
   const siteId = await getSiteId(req.user.id);
   if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
-  const stats = await paymentModel.getStats(siteId, pool);
+  // Agents see only their own stats
+  const assignedTo = req.user.role === 'AGENT' ? req.user.id : null;
+
+  const stats = await paymentModel.getStats(siteId, pool, assignedTo);
   res.json({ success: true, stats });
 });
 

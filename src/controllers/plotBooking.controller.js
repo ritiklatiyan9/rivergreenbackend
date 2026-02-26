@@ -150,6 +150,8 @@ export const createBooking = asyncHandler(async (req, res) => {
     bustCache('cache:*:/api/colony-maps*');
     bustCache('cache:*:/api/bookings*');
     bustCache('cache:*:/api/leads*');
+    bustCache('cache:*:/api/site/stats*');
+    bustCache('cache:*:/api/dashboard*');
 
     const fullBooking = await plotBookingModel.findByIdFull(booking.id, pool);
     res.status(201).json({ success: true, booking: fullBooking });
@@ -348,6 +350,8 @@ export const approveBooking = asyncHandler(async (req, res) => {
     bustCache('cache:*:/api/colony-maps*');
     bustCache('cache:*:/api/bookings*');
     bustCache('cache:*:/api/leads*');
+    bustCache('cache:*:/api/site/stats*');
+    bustCache('cache:*:/api/dashboard*');
 
     const fullBooking = await plotBookingModel.findByIdFull(id, pool);
     res.json({ success: true, booking: fullBooking, message: 'Booking approved!' });
@@ -492,6 +496,10 @@ export const updateBookingStatus = asyncHandler(async (req, res) => {
     // Update plot status based on booking status
     if (status === 'COMPLETED') {
       await dbClient.query('UPDATE map_plots SET status = $1, updated_at = NOW() WHERE id = $2', ['SOLD', booking.plot_id]);
+      // Update linked lead status to BOOKED
+      if (booking.lead_id) {
+        await dbClient.query('UPDATE leads SET status = $1, updated_at = NOW() WHERE id = $2', ['BOOKED', booking.lead_id]);
+      }
     } else if (status === 'CANCELLED') {
       await dbClient.query(
         `UPDATE map_plots SET status = 'AVAILABLE', owner_name = NULL, owner_phone = NULL, owner_email = NULL,
@@ -509,6 +517,9 @@ export const updateBookingStatus = asyncHandler(async (req, res) => {
 
     bustCache('cache:*:/api/colony-maps*');
     bustCache('cache:*:/api/bookings*');
+    bustCache('cache:*:/api/leads*');
+    bustCache('cache:*:/api/site/stats*');
+    bustCache('cache:*:/api/dashboard*');
 
     const updated = await plotBookingModel.findByIdFull(id, pool);
     res.json({ success: true, booking: updated });
@@ -527,6 +538,9 @@ export const getBookingStats = asyncHandler(async (req, res) => {
   const siteId = await getSiteId(req.user.id);
   if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
-  const stats = await plotBookingModel.getStats(siteId, pool);
+  // Agents only see stats for their own bookings
+  const bookedBy = req.user.role === 'AGENT' ? req.user.id : null;
+
+  const stats = await plotBookingModel.getStats(siteId, pool, bookedBy);
   res.json({ success: true, stats });
 });
