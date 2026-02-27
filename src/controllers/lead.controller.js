@@ -9,17 +9,21 @@ import { leadImportQueue } from '../utils/jobQueue.js';
 
 const VALID_STATUSES = ['NEW', 'CONTACTED', 'INTERESTED', 'SITE_VISIT', 'NEGOTIATION', 'BOOKED', 'LOST'];
 
-// Helper to get site_id safely
 const getSiteId = async (userId) => {
     const user = await userModel.findById(userId, pool);
     return user?.site_id;
 };
 
+const bustLeadCache = () => {
+    bustCache('cache:*:/api/leads*');
+    bustCache('cache:*:/api/site/leads*');
+};
+
 // ============================================================
-// LOG LEAD
+// CREATE LEAD — owner_id = creator, assigned_to = self by default
 // ============================================================
 export const createLead = asyncHandler(async (req, res) => {
-    const { name, phone, email, status, assigned_to, notes } = req.body;
+    const { name, phone, email, status, assigned_to, notes, lead_source } = req.body;
 
     if (!name || (!phone && !email)) {
         return res.status(400).json({ success: false, message: 'Name and either phone or email are required' });
@@ -30,6 +34,8 @@ export const createLead = asyncHandler(async (req, res) => {
         return res.status(404).json({ success: false, message: 'No site assigned to this user' });
     }
 
+    const effectiveAssignedTo = assigned_to || req.user.id;
+
     const leadData = {
         site_id: siteId,
         name,
@@ -38,16 +44,24 @@ export const createLead = asyncHandler(async (req, res) => {
         address: req.body.address || null,
         profession: req.body.profession || null,
         status: status || 'NEW',
-        assigned_to: assigned_to || req.user.id,
+        assigned_to: effectiveAssignedTo,
+        owner_id: req.user.id,
         created_by: req.user.id,
         notes: notes || null,
+        lead_source: lead_source || 'Other',
     };
 
     const newLead = await leadModel.create(leadData, pool);
 
-    // Bust cache related to leads and calls
-    bustCache('cache:*:/api/leads*');
-    bustCache('cache:*:/api/site/leads*');
+    if (assigned_to && assigned_to !== req.user.id) {
+        await pool.query(
+            `INSERT INTO lead_assignments (lead_id, assigned_from, assigned_to, assigned_by, reason)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [newLead.id, null, assigned_to, req.user.id, 'Initial assignment on creation']
+        );
+    }
+
+    bustLeadCache();
 
     res.status(201).json({
         success: true,
@@ -57,7 +71,7 @@ export const createLead = asyncHandler(async (req, res) => {
 });
 
 // ============================================================
-// GET LEADS (Paginated & Filtered)
+// GET LEADS — ownership-aware filtering
 // ============================================================
 export const getLeads = asyncHandler(async (req, res) => {
     const siteId = await getSiteId(req.user.id);
@@ -67,10 +81,7 @@ export const getLeads = asyncHandler(async (req, res) => {
 
     const page = parseInt(req.query.page) || 1;
     let limit = parseInt(req.query.limit) || 15;
-
-    if (req.query.limit === 'all') {
-        limit = -1;
-    }
+    if (req.query.limit === 'all') limit = -1;
 
     const filters = {
         site_id: siteId,
@@ -78,9 +89,9 @@ export const getLeads = asyncHandler(async (req, res) => {
         search: req.query.search
     };
 
-    // Role-based filtering
-    if (req.user.role === 'AGENT') {
-        filters.assigned_to = req.user.id;
+    // Agents & Team Heads see only leads they own or are assigned to
+    if (req.user.role === 'AGENT' || req.user.role === 'TEAM_HEAD') {
+        filters.owner_or_assigned = req.user.id;
     } else if (req.query.assigned_to) {
         filters.assigned_to = req.query.assigned_to;
     }
@@ -109,17 +120,20 @@ export const getLead = asyncHandler(async (req, res) => {
         return res.status(404).json({ success: false, message: 'Lead not found' });
     }
 
-    // Optional: Get assignee details manually if needed, or just return lead
-    // since we mainly need the name, status, etc.
-    const assignee = lead.assigned_to
-        ? await userModel.findById(lead.assigned_to, pool)
-        : null;
+    if ((req.user.role === 'AGENT' || req.user.role === 'TEAM_HEAD') &&
+        lead.owner_id !== req.user.id && lead.assigned_to !== req.user.id) {
+        return res.status(403).json({ success: false, message: 'Not authorized to view this lead' });
+    }
+
+    const assignee = lead.assigned_to ? await userModel.findById(lead.assigned_to, pool) : null;
+    const owner = lead.owner_id ? await userModel.findById(lead.owner_id, pool) : null;
 
     res.json({
         success: true,
         lead: {
             ...lead,
-            assigned_to_name: assignee ? assignee.name : null
+            assigned_to_name: assignee ? assignee.name : null,
+            owner_name: owner ? owner.name : null,
         }
     });
 });
@@ -138,8 +152,8 @@ export const updateLead = asyncHandler(async (req, res) => {
         return res.status(404).json({ success: false, message: 'Lead not found' });
     }
 
-    // Basic permission check
-    if (req.user.role === 'AGENT' && existingLead.assigned_to !== req.user.id) {
+    if ((req.user.role === 'AGENT' || req.user.role === 'TEAM_HEAD') &&
+        existingLead.owner_id !== req.user.id && existingLead.assigned_to !== req.user.id) {
         return res.status(403).json({ success: false, message: 'Not authorized to update this lead' });
     }
 
@@ -150,15 +164,25 @@ export const updateLead = asyncHandler(async (req, res) => {
     if (address !== undefined) updateData.address = address || null;
     if (profession !== undefined) updateData.profession = profession || null;
     if (status !== undefined) updateData.status = status;
-    if (assigned_to !== undefined && req.user.role !== 'AGENT') {
-        updateData.assigned_to = (assigned_to === '' || assigned_to === null) ? null : assigned_to;
-    }
     if (notes !== undefined) updateData.notes = notes || null;
 
-    const updatedLead = await leadModel.update(id, updateData, pool);
+    // Only ADMIN/OWNER can reassign via update
+    if (assigned_to !== undefined && (req.user.role === 'ADMIN' || req.user.role === 'OWNER')) {
+        const newAssignedTo = (assigned_to === '' || assigned_to === null) ? null : assigned_to;
+        if (newAssignedTo !== existingLead.assigned_to) {
+            updateData.assigned_to = newAssignedTo;
+            if (newAssignedTo) {
+                await pool.query(
+                    `INSERT INTO lead_assignments (lead_id, assigned_from, assigned_to, assigned_by, reason)
+                     VALUES ($1, $2, $3, $4, $5)`,
+                    [id, existingLead.assigned_to, newAssignedTo, req.user.id, 'Reassigned by admin']
+                );
+            }
+        }
+    }
 
-    bustCache('cache:*:/api/leads*');
-    bustCache('cache:*:/api/site/leads*');
+    const updatedLead = await leadModel.update(id, updateData, pool);
+    bustLeadCache();
 
     res.json({
         success: true,
@@ -180,15 +204,166 @@ export const deleteLead = asyncHandler(async (req, res) => {
     }
 
     await leadModel.delete(id, pool);
-
-    bustCache('cache:*:/api/leads*');
-    bustCache('cache:*:/api/site/leads*');
+    bustLeadCache();
 
     res.json({ success: true, message: 'Lead deleted successfully' });
 });
 
 // ============================================================
-// BULK UPLOAD LEADS (Excel) - Queue-backed, PostgreSQL job tracking
+// ASSIGN LEAD — any user can assign their own lead to another
+// ============================================================
+export const assignLead = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { assigned_to, reason } = req.body;
+
+    if (!assigned_to) {
+        return res.status(400).json({ success: false, message: 'assigned_to is required' });
+    }
+
+    const siteId = await getSiteId(req.user.id);
+    const lead = await leadModel.findById(id, pool);
+
+    if (!lead || lead.site_id !== siteId) {
+        return res.status(404).json({ success: false, message: 'Lead not found' });
+    }
+
+    const isAdminOrOwner = req.user.role === 'ADMIN' || req.user.role === 'OWNER';
+    if (!isAdminOrOwner && lead.owner_id !== req.user.id && lead.assigned_to !== req.user.id) {
+        return res.status(403).json({ success: false, message: 'Not authorized to assign this lead' });
+    }
+
+    const targetUser = await userModel.findById(assigned_to, pool);
+    if (!targetUser || targetUser.site_id !== siteId) {
+        return res.status(404).json({ success: false, message: 'Target user not found in this site' });
+    }
+
+    const previousAssignedTo = lead.assigned_to;
+    await leadModel.update(id, { assigned_to }, pool);
+
+    await pool.query(
+        `INSERT INTO lead_assignments (lead_id, assigned_from, assigned_to, assigned_by, reason)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [id, previousAssignedTo, assigned_to, req.user.id, reason || null]
+    );
+
+    bustLeadCache();
+
+    res.json({
+        success: true,
+        message: `Lead assigned to ${targetUser.name} successfully`,
+    });
+});
+
+// ============================================================
+// BULK ASSIGN LEADS
+// ============================================================
+export const bulkAssignLeads = asyncHandler(async (req, res) => {
+    const { lead_ids, assigned_to, reason } = req.body;
+
+    if (!lead_ids?.length || !assigned_to) {
+        return res.status(400).json({ success: false, message: 'lead_ids and assigned_to are required' });
+    }
+
+    const siteId = await getSiteId(req.user.id);
+    const targetUser = await userModel.findById(assigned_to, pool);
+    if (!targetUser || targetUser.site_id !== siteId) {
+        return res.status(404).json({ success: false, message: 'Target user not found' });
+    }
+
+    const isAdminOrOwner = req.user.role === 'ADMIN' || req.user.role === 'OWNER';
+    let assignedCount = 0;
+
+    for (const leadId of lead_ids) {
+        const lead = await leadModel.findById(leadId, pool);
+        if (!lead || lead.site_id !== siteId) continue;
+        if (!isAdminOrOwner && lead.owner_id !== req.user.id && lead.assigned_to !== req.user.id) continue;
+
+        const previousAssignedTo = lead.assigned_to;
+        await leadModel.update(leadId, { assigned_to }, pool);
+        await pool.query(
+            `INSERT INTO lead_assignments (lead_id, assigned_from, assigned_to, assigned_by, reason)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [leadId, previousAssignedTo, assigned_to, req.user.id, reason || 'Bulk assignment']
+        );
+        assignedCount++;
+    }
+
+    bustLeadCache();
+
+    res.json({
+        success: true,
+        message: `${assignedCount} leads assigned to ${targetUser.name}`,
+        assignedCount,
+    });
+});
+
+// ============================================================
+// GET ASSIGNMENT HISTORY FOR A LEAD
+// ============================================================
+export const getLeadAssignmentHistory = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const siteId = await getSiteId(req.user.id);
+    const lead = await leadModel.findById(id, pool);
+
+    if (!lead || lead.site_id !== siteId) {
+        return res.status(404).json({ success: false, message: 'Lead not found' });
+    }
+
+    const history = await leadModel.getAssignmentHistory(id, pool);
+    res.json({ success: true, history });
+});
+
+// ============================================================
+// GET ALL ASSIGNMENT HISTORY
+// ============================================================
+export const getAllAssignmentHistory = asyncHandler(async (req, res) => {
+    const siteId = await getSiteId(req.user.id);
+    if (!siteId) {
+        return res.status(404).json({ success: false, message: 'No site assigned' });
+    }
+
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const filters = { search: req.query.search };
+
+    if (req.user.role === 'AGENT' || req.user.role === 'TEAM_HEAD') {
+        filters.user_id = req.user.id;
+    } else if (req.query.user_id) {
+        filters.user_id = req.query.user_id;
+    }
+
+    const result = await leadModel.getAllAssignmentHistory(siteId, filters, page, limit, pool);
+
+    res.json({
+        success: true,
+        history: result.items,
+        pagination: result.pagination,
+    });
+});
+
+// ============================================================
+// GET ASSIGNABLE USERS (for dropdowns)
+// ============================================================
+export const getAssignableUsers = asyncHandler(async (req, res) => {
+    const siteId = await getSiteId(req.user.id);
+    if (!siteId) {
+        return res.status(404).json({ success: false, message: 'No site assigned' });
+    }
+
+    const result = await pool.query(
+        `SELECT id, name, email, role, phone FROM users
+         WHERE site_id = $1 AND role IN ('AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER') AND is_active = true
+         ORDER BY
+            CASE role WHEN 'OWNER' THEN 1 WHEN 'ADMIN' THEN 2 WHEN 'TEAM_HEAD' THEN 3 WHEN 'AGENT' THEN 4 END,
+            name ASC`,
+        [siteId]
+    );
+
+    res.json({ success: true, users: result.rows });
+});
+
+// ============================================================
+// BULK UPLOAD LEADS (Excel) — optimized with multi-row INSERT
 // ============================================================
 export const bulkUploadLeads = asyncHandler(async (req, res) => {
     if (!req.file) {
@@ -203,7 +378,6 @@ export const bulkUploadLeads = asyncHandler(async (req, res) => {
         return res.status(404).json({ success: false, message: 'No site assigned to this user' });
     }
 
-    // Read file into buffer and parse — avoids all path/ESM issues with readFile
     let workbook;
     try {
         const buffer = fs.readFileSync(filePath);
@@ -230,7 +404,6 @@ export const bulkUploadLeads = asyncHandler(async (req, res) => {
         return res.status(400).json({ success: false, message: 'Excel file is empty or has no data rows' });
     }
 
-    // Normalise column names: lowercase, strip spaces/underscores
     const normalise = (key) => key.toLowerCase().replace(/[\s_]/g, '');
     const validatedLeads = [];
     const invalidRows = [];
@@ -269,7 +442,6 @@ export const bulkUploadLeads = asyncHandler(async (req, res) => {
         });
     }
 
-    // Create a job record in PostgreSQL
     const { rows: [job] } = await pool.query(
         `INSERT INTO bulk_import_jobs (site_id, created_by, status, total_rows, processed_rows, failed_rows)
          VALUES ($1, $2, 'QUEUED', $3, 0, 0)
@@ -278,15 +450,12 @@ export const bulkUploadLeads = asyncHandler(async (req, res) => {
     );
     const jobId = job.id;
 
-    // Enqueue background processing — non-blocking, FIFO, no Redis needed
     leadImportQueue.enqueue(() =>
         processLeadBulkJob(jobId, validatedLeads, siteId, req.user.id)
     );
 
     console.log(`[BulkLeads] Job ${jobId} enqueued — ${validatedLeads.length} rows. Queue depth: ${leadImportQueue.size}`);
-
-    bustCache('cache:*:/api/leads*');
-    bustCache('cache:*:/api/site/leads*');
+    bustLeadCache();
 
     res.status(202).json({
         success: true,
@@ -300,7 +469,7 @@ export const bulkUploadLeads = asyncHandler(async (req, res) => {
 });
 
 // ============================================================
-// Background Processor — called exclusively by leadImportQueue
+// Background Processor — multi-row INSERT batches for speed
 // ============================================================
 async function processLeadBulkJob(jobId, leads, siteId, createdByUserId) {
     console.log(`[BulkLeads] Starting job ${jobId} — ${leads.length} leads`);
@@ -314,43 +483,67 @@ async function processLeadBulkJob(jobId, leads, siteId, createdByUserId) {
     let failedCount = 0;
     const failedDetails = [];
 
-    const BATCH_SIZE = 25;
+    const BATCH_SIZE = 50;
     for (let i = 0; i < leads.length; i += BATCH_SIZE) {
         const batch = leads.slice(i, i + BATCH_SIZE);
+        const values = [];
+        const placeholders = [];
+        let pIdx = 1;
 
-        for (let j = 0; j < batch.length; j++) {
-            const lead = batch[j];
-            const rowNumber = i + j + 2; // +2 for header row + 0-index offset
-            try {
-                await pool.query(
-                    `INSERT INTO leads
-                       (name, phone, email, address, profession, status, site_id, created_by, notes, created_at, updated_at)
-                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW(),NOW())`,
-                    [
-                        lead.name,
-                        lead.phone || null,
-                        lead.email || null,
-                        lead.address || null,
-                        lead.profession || null,
-                        lead.status || 'NEW',
-                        siteId,
-                        createdByUserId,
-                        lead.notes || null,
-                    ]
-                );
-                processedCount++;
-            } catch (err) {
-                failedCount++;
-                failedDetails.push({
-                    row: rowNumber,
-                    name: lead.name,
-                    phone: lead.phone,
-                    error: err.message.substring(0, 120),
-                });
+        for (const lead of batch) {
+            placeholders.push(
+                `($${pIdx++},$${pIdx++},$${pIdx++},$${pIdx++},$${pIdx++},$${pIdx++},$${pIdx++},$${pIdx++},$${pIdx++},$${pIdx++},NOW(),NOW())`
+            );
+            values.push(
+                lead.name,
+                lead.phone || null,
+                lead.email || null,
+                lead.address || null,
+                lead.profession || null,
+                lead.status || 'NEW',
+                siteId,
+                createdByUserId,
+                createdByUserId, // owner_id = uploader
+                lead.notes || null,
+            );
+        }
+
+        try {
+            await pool.query(
+                `INSERT INTO leads
+                   (name, phone, email, address, profession, status, site_id, created_by, owner_id, notes, created_at, updated_at)
+                 VALUES ${placeholders.join(',')}`,
+                values
+            );
+            processedCount += batch.length;
+        } catch (batchErr) {
+            // Fallback: row-by-row to identify failures
+            for (let j = 0; j < batch.length; j++) {
+                const lead = batch[j];
+                const rowNumber = i + j + 2;
+                try {
+                    await pool.query(
+                        `INSERT INTO leads
+                           (name, phone, email, address, profession, status, site_id, created_by, owner_id, notes, created_at, updated_at)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW(),NOW())`,
+                        [
+                            lead.name, lead.phone || null, lead.email || null,
+                            lead.address || null, lead.profession || null,
+                            lead.status || 'NEW', siteId, createdByUserId, createdByUserId,
+                            lead.notes || null,
+                        ]
+                    );
+                    processedCount++;
+                } catch (err) {
+                    failedCount++;
+                    failedDetails.push({
+                        row: rowNumber, name: lead.name, phone: lead.phone,
+                        error: err.message.substring(0, 120),
+                    });
+                }
             }
         }
 
-        // Flush progress to DB after every batch
         await pool.query(
             `UPDATE bulk_import_jobs
              SET processed_rows = $1, failed_rows = $2, failed_details = $3, updated_at = NOW()
@@ -405,6 +598,3 @@ export const getBulkJobStatus = asyncHandler(async (req, res) => {
         completedAt: job.completed_at,
     });
 });
-
-
-

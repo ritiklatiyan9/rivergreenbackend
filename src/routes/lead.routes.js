@@ -9,6 +9,11 @@ import {
     getLead,
     bulkUploadLeads,
     getBulkJobStatus,
+    assignLead,
+    bulkAssignLeads,
+    getLeadAssignmentHistory,
+    getAllAssignmentHistory,
+    getAssignableUsers,
 } from '../controllers/lead.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import checkRole from '../middlewares/role.middleware.js';
@@ -51,20 +56,29 @@ router.use(authMiddleware);
 // CRUD
 router.post('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), createLead);
 router.get('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), getLeads);
+
+// Assignment (static routes BEFORE :id)
+router.get('/assignable-users', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), getAssignableUsers);
+router.get('/assignment-history', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), getAllAssignmentHistory);
+router.post('/bulk-assign', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), bulkAssignLeads);
+
+// Single lead routes
 router.get('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), getLead);
 router.put('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), updateLead);
 router.delete('/:id', checkRole(['TEAM_HEAD', 'ADMIN', 'OWNER']), deleteLead);
+router.post('/:id/assign', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), assignLead);
+router.get('/:id/assignment-history', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), getLeadAssignmentHistory);
 
 // Bulk import
 router.post(
     '/bulk/upload',
-    checkRole(['TEAM_HEAD', 'ADMIN', 'OWNER']),
+    checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']),
     excelUpload.single('file'),
     bulkUploadLeads
 );
 router.get(
     '/bulk/status/:jobId',
-    checkRole(['TEAM_HEAD', 'ADMIN', 'OWNER']),
+    checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']),
     getBulkJobStatus
 );
 

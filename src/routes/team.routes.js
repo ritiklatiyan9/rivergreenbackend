@@ -8,10 +8,12 @@ import {
   updateTeam,
   deleteTeam,
   assignTeamHead,
+  removeTeamHead,
   moveAgent,
   removeTeamMember,
   getTeamPerformance,
   getTeamMembersPerformance,
+  getAllTeamsPerformance,
   setTeamTarget,
   getTeamTargets,
 } from '../controllers/team.controller.js';
@@ -21,6 +23,9 @@ import { cacheMiddleware } from '../middlewares/cache.middleware.js';
 
 // All team routes require authentication
 router.use(authMiddleware);
+
+// Static paths MUST come before :id params
+router.get('/all/performance', authMiddleware, checkRole(['ADMIN']), cacheMiddleware(120), getAllTeamsPerformance);
 
 // Read-only access for agents & team heads (own team)
 router.get('/:id', authMiddleware, cacheMiddleware(300), getTeam);
@@ -42,6 +47,9 @@ router.delete('/:id', deleteTeam);
 
 // Assign head
 router.put('/:id/assign-head', assignTeamHead);
+
+// Remove head
+router.delete('/:id/remove-head', removeTeamHead);
 
 // Members
 router.delete('/:id/members/:userId', removeTeamMember);

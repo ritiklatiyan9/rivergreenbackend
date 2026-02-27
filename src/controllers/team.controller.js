@@ -133,17 +133,60 @@ export const assignTeamHead = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'User does not belong to your site' });
   }
 
-  // Remove old head's team assignment if different
-  if (team.head_id && team.head_id !== user_id) {
-    await userModel.update(team.head_id, { team_id: null }, pool);
+  // If team already has a different head, admin must remove them first
+  if (team.head_id && String(team.head_id) !== String(user_id)) {
+    const oldHead = await userModel.findById(team.head_id, pool);
+    return res.status(409).json({
+      success: false,
+      message: `This team already has a head (${oldHead?.name || 'Unknown'}). Please remove the current head before assigning a new one.`,
+      current_head: oldHead ? { id: oldHead.id, name: oldHead.name, email: oldHead.email } : null,
+    });
   }
 
-  // Update team head and assign team to user (role is unchanged — agent can lead a team)
+  // Update team head, assign team to user, and promote role to TEAM_HEAD
   const updated = await teamModel.update(id, { head_id: user_id }, pool);
-  await userModel.update(user_id, { team_id: id }, pool);
+  await userModel.update(user_id, { team_id: id, role: 'TEAM_HEAD' }, pool);
 
   bustCache('cache:*:/api/teams*');
+  bustCache('cache:*:/api/site/users*');
   res.json({ success: true, team: updated });
+});
+
+// ============================================================
+// REMOVE TEAM HEAD
+// ============================================================
+
+export const removeTeamHead = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  const adminUser = await userModel.findById(req.user.id, pool);
+  if (!adminUser || !adminUser.site_id) {
+    return res.status(404).json({ success: false, message: 'No site assigned' });
+  }
+
+  const team = await teamModel.findByIdAndSite(id, adminUser.site_id, pool);
+  if (!team) {
+    return res.status(404).json({ success: false, message: 'Team not found' });
+  }
+
+  if (!team.head_id) {
+    return res.status(400).json({ success: false, message: 'This team has no head assigned.' });
+  }
+
+  const oldHead = await userModel.findById(team.head_id, pool);
+  if (oldHead && oldHead.role === 'TEAM_HEAD') {
+    await userModel.update(team.head_id, { role: 'AGENT' }, pool);
+  }
+
+  const updated = await teamModel.update(id, { head_id: null }, pool);
+
+  bustCache('cache:*:/api/teams*');
+  bustCache('cache:*:/api/site/users*');
+  res.json({
+    success: true,
+    message: `${oldHead?.name || 'Head'} removed as team head. Role reverted to Agent.`,
+    team: updated,
+  });
 });
 
 // ============================================================
@@ -365,6 +408,93 @@ export const getTeamMembersPerformance = asyncHandler(async (req, res) => {
     members: membersResult.rows,
     dailyTrend: trendResult.rows,
     pipeline: pipelineResult.rows,
+  });
+});
+
+// ============================================================
+// ALL TEAMS PERFORMANCE (Admin Overview)
+// ============================================================
+
+export const getAllTeamsPerformance = asyncHandler(async (req, res) => {
+  const user = await userModel.findById(req.user.id, pool);
+  if (!user || !user.site_id) {
+    return res.status(404).json({ success: false, message: 'No site assigned' });
+  }
+
+  const query = `
+    SELECT
+      t.id,
+      t.name,
+      t.head_id,
+      t.created_at,
+      h.name as head_name,
+      h.email as head_email,
+      COALESCE(ms.member_count, 0)::int as member_count,
+      COALESCE(ls.total_leads, 0)::int as total_leads,
+      COALESCE(ls.new_leads, 0)::int as new_leads,
+      COALESCE(ls.interested_leads, 0)::int as interested_leads,
+      COALESCE(bs.total_bookings, 0)::int as total_bookings,
+      COALESCE(bs.total_revenue, 0)::numeric as total_revenue,
+      COALESCE(cs.total_calls, 0)::int as total_calls,
+      COALESCE(cs.calls_today, 0)::int as calls_today,
+      COALESCE(cs.calls_this_week, 0)::int as calls_this_week,
+      COALESCE(fs.total_followups, 0)::int as total_followups,
+      COALESCE(fs.completed_followups, 0)::int as completed_followups,
+      CASE
+        WHEN COALESCE(ls.total_leads, 0) > 0
+        THEN ROUND(COALESCE(bs.total_bookings, 0)::numeric / ls.total_leads * 100, 1)
+        ELSE 0
+      END as conversion_rate
+    FROM teams t
+    LEFT JOIN users h ON t.head_id = h.id
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*) as member_count FROM users WHERE team_id = t.id
+    ) ms ON true
+    LEFT JOIN LATERAL (
+      SELECT
+        COUNT(*) as total_leads,
+        COUNT(*) FILTER (WHERE l.status = 'NEW') as new_leads,
+        COUNT(*) FILTER (WHERE l.status = 'INTERESTED') as interested_leads
+      FROM leads l WHERE l.team_id = t.id
+    ) ls ON true
+    LEFT JOIN LATERAL (
+      SELECT
+        COUNT(*) as total_bookings,
+        COALESCE(SUM(pb.total_amount), 0) as total_revenue
+      FROM plot_bookings pb
+      JOIN users ub ON pb.booked_by = ub.id
+      WHERE ub.team_id = t.id AND pb.status IN ('ACTIVE','COMPLETED')
+    ) bs ON true
+    LEFT JOIN LATERAL (
+      SELECT
+        COUNT(*) as total_calls,
+        COUNT(*) FILTER (WHERE c.call_start::date = CURRENT_DATE) as calls_today,
+        COUNT(*) FILTER (WHERE c.call_start >= date_trunc('week', CURRENT_DATE)) as calls_this_week
+      FROM calls c WHERE c.assigned_to IN (SELECT id FROM users WHERE team_id = t.id)
+    ) cs ON true
+    LEFT JOIN LATERAL (
+      SELECT
+        COUNT(*) as total_followups,
+        COUNT(*) FILTER (WHERE f.status = 'COMPLETED') as completed_followups
+      FROM followups f WHERE f.assigned_to IN (SELECT id FROM users WHERE team_id = t.id)
+    ) fs ON true
+    WHERE t.site_id = $1
+    ORDER BY total_revenue DESC, t.name
+  `;
+
+  const result = await pool.query(query, [user.site_id]);
+
+  res.json({
+    success: true,
+    teams: result.rows,
+    summary: {
+      total_teams: result.rows.length,
+      total_members: result.rows.reduce((s, t) => s + t.member_count, 0),
+      total_leads: result.rows.reduce((s, t) => s + t.total_leads, 0),
+      total_bookings: result.rows.reduce((s, t) => s + t.total_bookings, 0),
+      total_revenue: result.rows.reduce((s, t) => s + parseFloat(t.total_revenue || 0), 0),
+      total_calls: result.rows.reduce((s, t) => s + t.total_calls, 0),
+    },
   });
 });
 
