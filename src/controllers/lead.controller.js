@@ -6,6 +6,7 @@ import { bustCache } from '../middlewares/cache.middleware.js';
 import { read as xlsxRead, utils as xlsxUtils } from 'xlsx';
 import fs from 'fs';
 import { leadImportQueue } from '../utils/jobQueue.js';
+import { uploadSingle } from '../utils/upload.js';
 
 const VALID_STATUSES = ['NEW', 'CONTACTED', 'INTERESTED', 'SITE_VISIT', 'NEGOTIATION', 'BOOKED', 'LOST'];
 
@@ -36,6 +37,17 @@ export const createLead = asyncHandler(async (req, res) => {
 
     const effectiveAssignedTo = assigned_to || req.user.id;
 
+    // Handle photo upload if provided
+    let photoUrl = null;
+    if (req.file) {
+        try {
+            const result = await uploadSingle(req.file, 'cloudinary');
+            photoUrl = result.secure_url;
+        } catch (err) {
+            console.error('Lead photo upload error:', err);
+        }
+    }
+
     const leadData = {
         site_id: siteId,
         name,
@@ -49,6 +61,7 @@ export const createLead = asyncHandler(async (req, res) => {
         created_by: req.user.id,
         notes: notes || null,
         lead_source: lead_source || 'Other',
+        photo_url: photoUrl,
     };
 
     const newLead = await leadModel.create(leadData, pool);
@@ -165,6 +178,20 @@ export const updateLead = asyncHandler(async (req, res) => {
     if (profession !== undefined) updateData.profession = profession || null;
     if (status !== undefined) updateData.status = status;
     if (notes !== undefined) updateData.notes = notes || null;
+
+    // Handle photo upload
+    if (req.file) {
+        try {
+            const result = await uploadSingle(req.file, 'cloudinary');
+            updateData.photo_url = result.secure_url;
+        } catch (err) {
+            console.error('Lead photo upload error:', err);
+        }
+    }
+    // Allow removing photo
+    if (req.body.remove_photo === 'true') {
+        updateData.photo_url = null;
+    }
 
     // Only ADMIN/OWNER can reassign via update
     if (assigned_to !== undefined && (req.user.role === 'ADMIN' || req.user.role === 'OWNER')) {

@@ -2,12 +2,21 @@ import asyncHandler from '../utils/asyncHandler.js';
 import { signAccessToken, signRefreshToken, verifyToken, hashPassword, comparePassword, hashRefreshToken } from '../config/jwt.js';
 import userModel from '../models/User.model.js';
 import pool from '../config/db.js';
+import { uploadSingle } from '../utils/upload.js';
 
 const REFRESH_COOKIE_OPTIONS = {
   httpOnly: true,
-  secure: true,                       // required for sameSite:'none'
-  sameSite: 'none',                   // allow cross-origin cookie (frontend ↔ backend on different hosts)
+  secure: process.env.NODE_ENV === 'production',
+  sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
   maxAge: 7 * 24 * 60 * 60 * 1000,   // 7 days
+  path: '/',
+};
+
+// clearCookie must use the same flags (minus maxAge) to actually remove the cookie
+const CLEAR_COOKIE_OPTIONS = {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === 'production',
+  sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
   path: '/',
 };
 
@@ -122,14 +131,14 @@ export const refresh = asyncHandler(async (req, res) => {
     const user = await userModel.findById(decoded.id, pool);
     if (!user || user.token_version !== decoded.version) {
       if (user) await userModel.update(user.id, { token_version: (user.token_version || 0) + 1, refresh_token: null }, pool);
-      res.clearCookie('refreshToken', { path: '/' });
+      res.clearCookie('refreshToken', CLEAR_COOKIE_OPTIONS);
       throw new Error('version_mismatch');
     }
 
     const valid = await comparePassword(refreshToken, user.refresh_token);
     if (!valid) {
       await userModel.update(user.id, { token_version: (user.token_version || 0) + 1, refresh_token: null }, pool);
-      res.clearCookie('refreshToken', { path: '/' });
+      res.clearCookie('refreshToken', CLEAR_COOKIE_OPTIONS);
       throw new Error('invalid_hash');
     }
 
@@ -167,7 +176,7 @@ export const refresh = asyncHandler(async (req, res) => {
 export const logout = asyncHandler(async (req, res) => {
   const userId = req.user.id;
   await userModel.update(userId, { refresh_token: null }, pool);
-  res.clearCookie('refreshToken', { path: '/' });
+  res.clearCookie('refreshToken', CLEAR_COOKIE_OPTIONS);
   res.json({ success: true, message: 'Logged out' });
 });
 
@@ -180,12 +189,17 @@ export const getMe = asyncHandler(async (req, res) => {
 
 // Update own profile
 export const updateProfile = asyncHandler(async (req, res) => {
-  const { name, email, currentPassword, newPassword } = req.body;
+  const { name, email, phone, address, designation, bio, currentPassword, newPassword } = req.body;
   const userId = req.user.id;
   const user = await userModel.findById(userId, pool);
 
   let updateData = {};
   if (name) updateData.name = name;
+  if (phone !== undefined) updateData.phone = phone;
+  if (address !== undefined) updateData.address = address;
+  if (designation !== undefined) updateData.designation = designation;
+  if (bio !== undefined) updateData.bio = bio;
+
   if (email) {
     const existing = await userModel.findByEmail(email, pool);
     if (existing && existing.id !== userId) {
@@ -193,6 +207,18 @@ export const updateProfile = asyncHandler(async (req, res) => {
     }
     updateData.email = email;
   }
+
+  // Handle profile photo upload via multer
+  if (req.file) {
+    try {
+      const result = await uploadSingle(req.file, 'cloudinary');
+      updateData.profile_photo = result.secure_url;
+    } catch (err) {
+      console.error('Profile photo upload error:', err);
+      return res.status(500).json({ success: false, message: 'Failed to upload profile photo' });
+    }
+  }
+
   if (newPassword) {
     if (!currentPassword) {
       return res.status(400).json({ success: false, message: 'Current password is required' });
@@ -208,6 +234,7 @@ export const updateProfile = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'No data to update' });
   }
 
-  const updatedUser = await userModel.update(userId, updateData, pool);
-  res.json({ success: true, user: sanitizeUser(updatedUser) });
+  await userModel.update(userId, updateData, pool);
+  const updatedUser = await userModel.findByIdSafe(userId, pool);
+  res.json({ success: true, user: updatedUser });
 });

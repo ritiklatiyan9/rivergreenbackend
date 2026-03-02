@@ -50,11 +50,13 @@ const excelUpload = multer({
     fileFilter: excelFilter,
 });
 
+import upload from '../middlewares/multer.middleware.js';
+
 // ── All routes require auth ──────────────────────────────────────────────────
 router.use(authMiddleware);
 
 // CRUD
-router.post('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), createLead);
+router.post('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), upload.single('photo'), createLead);
 router.get('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), getLeads);
 
 // Assignment (static routes BEFORE :id)
@@ -64,7 +66,7 @@ router.post('/bulk-assign', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']),
 
 // Single lead routes
 router.get('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), getLead);
-router.put('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), updateLead);
+router.put('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), upload.single('photo'), updateLead);
 router.delete('/:id', checkRole(['TEAM_HEAD', 'ADMIN', 'OWNER']), deleteLead);
 router.post('/:id/assign', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), assignLead);
 router.get('/:id/assignment-history', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), getLeadAssignmentHistory);

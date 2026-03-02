@@ -17,6 +17,7 @@ import clientRoutes from './client.routes.js';
 import clientActivityRoutes from './clientActivity.routes.js';
 import dashboardRoutes from './dashboard.routes.js';
 import contentShareRoutes from './contentShare.routes.js';
+import attendanceRoutes from './attendance.routes.js';
 
 router.use('/auth', authRoutes);
 router.use('/upload', uploadRoutes);
@@ -34,5 +35,6 @@ router.use('/clients', clientRoutes);
 router.use('/activities', clientActivityRoutes);
 router.use('/dashboard', dashboardRoutes);
 router.use('/content-share', contentShareRoutes);
+router.use('/attendance', attendanceRoutes);
 
 export default router;
