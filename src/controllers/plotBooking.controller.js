@@ -172,7 +172,7 @@ export const agentBookPlot = asyncHandler(async (req, res) => {
   const {
     client_name, client_phone, client_email, client_address,
     booking_amount, total_amount, payment_type, installment_count,
-    installment_frequency, notes, lead_id,
+    installment_frequency, notes, lead_id, ref_sponsor_code,
   } = req.body;
 
   if (!client_name || !client_phone) {
@@ -210,6 +210,16 @@ export const agentBookPlot = asyncHandler(async (req, res) => {
     const parsedInstallmentCount = parseInt(installment_count) || 1;
     const freq = installment_frequency || 'MONTHLY';
 
+    // Resolve referring agent from sponsor code in share link
+    let referredById = req.user.id; // default: the booking agent
+    if (ref_sponsor_code) {
+      const refAgent = await dbClient.query(
+        `SELECT id FROM users WHERE UPPER(sponsor_code) = UPPER($1) AND is_active = true`,
+        [ref_sponsor_code]
+      );
+      if (refAgent.rows.length > 0) referredById = refAgent.rows[0].id;
+    }
+
     const bookingId = req.body.id || randomUUID();
     const booking = await plotBookingModel.create({
       id: bookingId,
@@ -228,17 +238,17 @@ export const agentBookPlot = asyncHandler(async (req, res) => {
       installment_count: parsedInstallmentCount,
       installment_frequency: freq,
       booked_by: req.user.id,
-      referred_by: req.user.id,
+      referred_by: referredById,
       status: 'PENDING_APPROVAL',
-      notes: notes || `Booked by agent via shared link`,
+      notes: notes || `Booked by agent via shared link${ref_sponsor_code ? ` (ref: ${ref_sponsor_code})` : ''}`,
     }, dbClient);
 
     // Update plot to RESERVED (not BOOKED yet — awaiting admin approval)
     await dbClient.query(
       `UPDATE map_plots SET status = 'RESERVED', owner_name = $1, owner_phone = $2,
        booking_date = CURRENT_DATE, booking_amount = $3, assigned_agent = $4,
-       lead_id = $5, updated_by = $4, updated_at = NOW() WHERE id = $6`,
-      [client_name, client_phone, parsedBookingAmount, req.user.id, lead_id, plotId]
+       referred_by = $5, lead_id = $6, updated_by = $4, updated_at = NOW() WHERE id = $7`,
+      [client_name, client_phone, parsedBookingAmount, req.user.id, referredById, lead_id, plotId]
     );
 
     // Create initial booking payment record (PENDING until approved)
@@ -523,6 +533,122 @@ export const updateBookingStatus = asyncHandler(async (req, res) => {
 
     const updated = await plotBookingModel.findByIdFull(id, pool);
     res.json({ success: true, booking: updated });
+  } catch (err) {
+    await dbClient.query('ROLLBACK');
+    throw err;
+  } finally {
+    dbClient.release();
+  }
+});
+
+// ============================================================
+// PUBLIC BOOKING (no auth — from share link)
+// ============================================================
+export const publicBookPlot = asyncHandler(async (req, res) => {
+  const { plotId } = req.params;
+  const {
+    client_name, client_phone, client_email,
+    booking_amount, total_amount, payment_type,
+    installment_count, installment_frequency,
+    payment_method, transaction_id, upi_id,
+    ref_sponsor_code, remarks,
+  } = req.body;
+
+  if (!client_name || !client_phone) {
+    return res.status(400).json({ success: false, message: 'Client name and phone are required' });
+  }
+  if (!booking_amount || Number(booking_amount) <= 0) {
+    return res.status(400).json({ success: false, message: 'Valid booking amount is required' });
+  }
+
+  const plot = await mapPlotModel.findById(plotId, pool);
+  if (!plot) {
+    return res.status(404).json({ success: false, message: 'Plot not found' });
+  }
+  if (plot.status !== 'AVAILABLE') {
+    return res.status(400).json({ success: false, message: `Plot is ${plot.status} and cannot be booked` });
+  }
+
+  const existingBooking = await plotBookingModel.findActiveByPlot(plotId, pool);
+  if (existingBooking) {
+    return res.status(400).json({ success: false, message: 'This plot already has an active booking' });
+  }
+
+  // Collect screenshot file paths from multer
+  const screenshotUrls = (req.files || []).map(f => `/uploads/${f.filename}`);
+
+  const dbClient = await pool.connect();
+  try {
+    await dbClient.query('BEGIN');
+
+    const parsedBookingAmount = parseFloat(booking_amount || 0);
+    const parsedTotalAmount = parseFloat(total_amount || booking_amount || 0);
+    const parsedInstallmentCount = parseInt(installment_count) || 1;
+    const freq = installment_frequency || 'MONTHLY';
+
+    // Resolve referring agent from sponsor code in share link
+    let referredById = null;
+    if (ref_sponsor_code) {
+      const refAgent = await dbClient.query(
+        `SELECT id FROM users WHERE UPPER(sponsor_code) = UPPER($1) AND is_active = true`,
+        [ref_sponsor_code]
+      );
+      if (refAgent.rows.length > 0) referredById = refAgent.rows[0].id;
+    }
+
+    const bookingId = randomUUID();
+    const booking = await plotBookingModel.create({
+      id: bookingId,
+      site_id: plot.site_id,
+      plot_id: plotId,
+      colony_map_id: plot.colony_map_id,
+      client_name,
+      client_phone,
+      client_email: client_email || null,
+      booking_date: new Date().toISOString().slice(0, 10),
+      booking_amount: parsedBookingAmount,
+      total_amount: parsedTotalAmount,
+      payment_type: payment_type || 'ONE_TIME',
+      installment_count: parsedInstallmentCount,
+      installment_frequency: freq,
+      referred_by: referredById,
+      status: 'PENDING_APPROVAL',
+      booking_source: 'PUBLIC',
+      screenshot_urls: JSON.stringify(screenshotUrls),
+      notes: remarks || `Public booking via share link${ref_sponsor_code ? ` (ref: ${ref_sponsor_code})` : ''}`,
+    }, dbClient);
+
+    // Update plot to RESERVED (awaiting admin approval)
+    await dbClient.query(
+      `UPDATE map_plots SET status = 'RESERVED', owner_name = $1, owner_phone = $2,
+       booking_date = CURRENT_DATE, booking_amount = $3,
+       referred_by = $4, updated_at = NOW() WHERE id = $5`,
+      [client_name, client_phone, parsedBookingAmount, referredById, plotId]
+    );
+
+    // Create initial booking payment record (PENDING until approved)
+    await paymentModel.create({
+      site_id: plot.site_id,
+      booking_id: booking.id,
+      plot_id: plotId,
+      amount: parsedBookingAmount,
+      payment_date: new Date().toISOString().slice(0, 10),
+      payment_method: payment_method || 'UPI',
+      payment_type: 'BOOKING',
+      installment_number: 0,
+      status: 'PENDING',
+      transaction_id: transaction_id || null,
+      upi_id: upi_id || null,
+      screenshot_urls: JSON.stringify(screenshotUrls),
+      notes: 'Public booking payment (pending approval)',
+    }, dbClient);
+
+    await dbClient.query('COMMIT');
+
+    bustCache('cache:*:/api/colony-maps*');
+    bustCache('cache:*:/api/bookings*');
+
+    res.status(201).json({ success: true, booking, message: 'Booking submitted! Admin will verify and confirm.' });
   } catch (err) {
     await dbClient.query('ROLLBACK');
     throw err;

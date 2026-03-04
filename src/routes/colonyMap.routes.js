@@ -1,5 +1,6 @@
 import express from 'express';
 const router = express.Router();
+import upload from '../middlewares/multer.middleware.js';
 
 import {
     getColonyMaps,
@@ -15,6 +16,8 @@ import {
     bulkSavePlots,
     getMapStats,
     getPublicPlot,
+    initializeLayout,
+    uploadMapImage,
 } from '../controllers/colonyMap.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import checkRole from '../middlewares/role.middleware.js';
@@ -29,9 +32,13 @@ router.get('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), getColon
 router.get('/:id/stats', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), getMapStats);
 router.get('/:id/plots/:plotId', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), getPlot);
 
+// Initialize layout from code-defined config (creates map + all plots)
+router.post('/initialize', checkRole(['ADMIN']), initializeLayout);
+
 // Write routes: ADMIN only
 router.post('/', checkRole(['ADMIN']), createColonyMap);
 router.put('/:id', checkRole(['ADMIN']), updateColonyMap);
+router.post('/:id/upload-image', checkRole(['ADMIN']), upload.single('map_image'), uploadMapImage);
 router.delete('/:id', checkRole(['ADMIN']), deleteColonyMap);
 
 // Plot write routes

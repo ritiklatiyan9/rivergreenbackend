@@ -76,7 +76,8 @@ class PlotBookingModel extends MasterModel {
         mp.status as plot_status, mp.facing, mp.plot_type,
         cm.name as colony_name, cm.image_url as map_image_url,
         u_booked.name as booked_by_name, u_booked.email as booked_by_email, u_booked.phone as booked_by_phone,
-        u_referred.name as referred_by_name,
+        u_booked.sponsor_code as booked_by_sponsor_code,
+        u_referred.name as referred_by_name, u_referred.sponsor_code as referred_by_sponsor_code,
         u_approved.name as approved_by_name,
         l.name as lead_name, l.phone as lead_phone, l.email as lead_email,
         COALESCE(

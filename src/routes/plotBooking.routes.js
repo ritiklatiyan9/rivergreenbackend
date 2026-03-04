@@ -11,11 +11,17 @@ import {
   approveBooking,
   rejectBooking,
   getPendingApprovals,
+  publicBookPlot,
 } from '../controllers/plotBooking.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import checkRole from '../middlewares/role.middleware.js';
+import upload from '../middlewares/multer.middleware.js';
 
-// All booking routes require auth
+// ── PUBLIC route (no auth) ─────────────────────────────
+// Accept up to 5 screenshots
+router.post('/public-book/:plotId', upload.array('screenshots', 5), publicBookPlot);
+
+// All other booking routes require auth
 router.use(authMiddleware);
 
 // Agent booking via shared link (AGENT, TEAM_HEAD, ADMIN)

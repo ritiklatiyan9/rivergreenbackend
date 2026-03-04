@@ -2,6 +2,23 @@ import pool from '../config/db.js';
 import ColonyMap from '../models/ColonyMap.model.js';
 import MapPlot from '../models/MapPlot.model.js';
 
+// ─── Upload Map Image ───────────────────────────────────────
+
+export const uploadMapImage = async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ success: false, message: 'No image file uploaded' });
+        }
+        const imageUrl = `/uploads/${req.file.filename}`;
+        const map = await ColonyMap.update(req.params.id, { image_url: imageUrl }, pool);
+        if (!map) return res.status(404).json({ success: false, message: 'Colony map not found' });
+        res.json({ success: true, map, image_url: imageUrl });
+    } catch (err) {
+        console.error('uploadMapImage error:', err);
+        res.status(500).json({ success: false, message: 'Failed to upload map image' });
+    }
+};
+
 // ─── Colony Map CRUD ────────────────────────────────────────
 
 export const getColonyMaps = async (req, res) => {
@@ -48,13 +65,14 @@ export const createColonyMap = async (req, res) => {
 
 export const updateColonyMap = async (req, res) => {
     try {
-        const { name, image_url, image_width, image_height, is_active } = req.body;
+        const { name, image_url, image_width, image_height, is_active, layout_config } = req.body;
         const data = {};
         if (name !== undefined) data.name = name;
         if (image_url !== undefined) data.image_url = image_url;
         if (image_width !== undefined) data.image_width = image_width;
         if (image_height !== undefined) data.image_height = image_height;
         if (is_active !== undefined) data.is_active = is_active;
+        if (layout_config !== undefined) data.layout_config = JSON.stringify(layout_config);
 
         if (Object.keys(data).length === 0) {
             return res.status(400).json({ success: false, message: 'No fields to update' });
@@ -70,16 +88,45 @@ export const updateColonyMap = async (req, res) => {
 };
 
 export const deleteColonyMap = async (req, res) => {
+    const client = await pool.connect();
     try {
-        // Explicitly delete mapped plots just in case CASCADE is missing on DB
-        await pool.query('DELETE FROM map_plots WHERE colony_map_id = $1', [req.params.id]);
+        await client.query('BEGIN');
 
-        const map = await ColonyMap.delete(req.params.id, pool);
-        if (!map) return res.status(404).json({ success: false, message: 'Colony map not found' });
-        res.json({ success: true, message: 'Colony map and associated plots deleted' });
+        const mapId = req.params.id;
+
+        // 1. Get all plot IDs belonging to this map
+        const plotRes = await client.query('SELECT id FROM map_plots WHERE colony_map_id = $1', [mapId]);
+        const plotIds = plotRes.rows.map(r => r.id);
+
+        if (plotIds.length > 0) {
+            // 2. Delete payments referencing these plots
+            await client.query('DELETE FROM payments WHERE plot_id = ANY($1::uuid[])', [plotIds]);
+            // 3. Delete client_activities referencing these plots
+            await client.query('DELETE FROM client_activities WHERE plot_id = ANY($1::uuid[])', [plotIds]);
+            // 4. Delete plot_bookings referencing these plots or this colony map
+            await client.query('DELETE FROM plot_bookings WHERE plot_id = ANY($1::uuid[]) OR colony_map_id = $2', [plotIds, mapId]);
+            // 5. Delete the plots themselves
+            await client.query('DELETE FROM map_plots WHERE colony_map_id = $1', [mapId]);
+        } else {
+            // Still clean up any orphaned bookings referencing this map
+            await client.query('DELETE FROM plot_bookings WHERE colony_map_id = $1', [mapId]);
+        }
+
+        // 6. Delete the colony map
+        const result = await client.query('DELETE FROM colony_maps WHERE id = $1 RETURNING *', [mapId]);
+        if (result.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ success: false, message: 'Colony map not found' });
+        }
+
+        await client.query('COMMIT');
+        res.json({ success: true, message: 'Colony map and all associated data deleted' });
     } catch (err) {
+        await client.query('ROLLBACK');
         console.error('deleteColonyMap error:', err);
-        res.status(500).json({ success: false, message: 'Failed to delete colony map' });
+        res.status(500).json({ success: false, message: 'Failed to delete colony map: ' + err.message });
+    } finally {
+        client.release();
     }
 };
 
@@ -207,8 +254,7 @@ export const getPublicPlot = async (req, res) => {
         const plot = await MapPlot.findByIdFull(req.params.plotId, pool);
         if (!plot) return res.status(404).json({ success: false, message: 'Plot not found' });
 
-        // Hide sensitive lead/owner contact info for public view just in case,
-        // but keep name and status
+        // Hide sensitive lead/owner contact info for public view
         const safePlot = { ...plot };
         delete safePlot.owner_phone;
         delete safePlot.owner_email;
@@ -217,7 +263,44 @@ export const getPublicPlot = async (req, res) => {
         delete safePlot.documents;
         delete safePlot.notes;
 
-        res.json({ success: true, plot: safePlot });
+        // Fetch full colony data (layout_config + all plots) for interactive map
+        let colonyData = null;
+        if (plot.colony_map_id) {
+            const mapRes = await pool.query(
+                `SELECT id, name, image_url, layout_config FROM colony_maps WHERE id = $1`,
+                [plot.colony_map_id]
+            );
+            if (mapRes.rows.length > 0) {
+                const map = mapRes.rows[0];
+                const plotsRes = await pool.query(
+                    `SELECT id, plot_number, polygon_points, fill_color, status FROM map_plots WHERE colony_map_id = $1`,
+                    [plot.colony_map_id]
+                );
+                colonyData = {
+                    id: map.id,
+                    name: map.name,
+                    image_url: map.image_url || null,
+                    layout_config: map.layout_config,
+                    plots: plotsRes.rows,
+                };
+            }
+        }
+
+        // If ?ref= sponsor_code is provided, look up the agent
+        let referringAgent = null;
+        const refCode = req.query.ref;
+        if (refCode) {
+            const agentRes = await pool.query(
+                `SELECT id, name, sponsor_code, phone, profile_photo FROM users WHERE UPPER(sponsor_code) = UPPER($1) AND is_active = true`,
+                [refCode]
+            );
+            if (agentRes.rows.length > 0) {
+                const a = agentRes.rows[0];
+                referringAgent = { id: a.id, name: a.name, sponsor_code: a.sponsor_code, phone: a.phone, profile_photo: a.profile_photo };
+            }
+        }
+
+        res.json({ success: true, plot: safePlot, referringAgent, colonyData });
     } catch (err) {
         console.error('getPublicPlot error:', err);
         res.status(500).json({ success: false, message: 'Failed to fetch plot' });
@@ -296,5 +379,99 @@ export const getMapStats = async (req, res) => {
     } catch (err) {
         console.error('getMapStats error:', err);
         res.status(500).json({ success: false, message: 'Failed to fetch map stats' });
+    }
+};
+
+// ─── Create Colony with Quadrant Layout ──────────────────
+// Admin specifies 4 quadrants (TL/TR/BL/BR) with rows+cols + road interval.
+// Creates colony_map + generates all plot records in one atomic transaction.
+export const initializeLayout = async (req, res) => {
+    const client = await pool.connect();
+    try {
+        // Ensure layout_config column exists
+        await client.query(
+            `ALTER TABLE colony_maps ADD COLUMN IF NOT EXISTS layout_config JSONB DEFAULT '{}'::jsonb`
+        );
+
+        await client.query('BEGIN');
+
+        const { name, layoutConfig } = req.body;
+        if (!name || !layoutConfig) {
+            return res.status(400).json({ success: false, message: 'name and layoutConfig are required' });
+        }
+
+        const { topLeft, topRight, bottomLeft, bottomRight } = layoutConfig;
+
+        // Create the colony map record with layout_config
+        const mapRes = await client.query(
+            `INSERT INTO colony_maps (site_id, name, image_url, image_width, image_height, layout_config, created_by)
+             VALUES ($1, $2, '', 0, 0, $3, $4) RETURNING id`,
+            [req.user.site_id, name, JSON.stringify(layoutConfig), req.user.id]
+        );
+        const mapId = mapRes.rows[0].id;
+
+        // Generate plot positions from 4 quadrants
+        const plotPositions = [];
+        const quads = [
+            { key: 'TL', cfg: topLeft },
+            { key: 'TR', cfg: topRight },
+            { key: 'BL', cfg: bottomLeft },
+            { key: 'BR', cfg: bottomRight },
+        ];
+
+        for (const { key, cfg } of quads) {
+            if (!cfg?.rows || !cfg?.cols) continue;
+            for (let r = 0; r < cfg.rows; r++) {
+                for (let c = 0; c < cfg.cols; c++) {
+                    plotPositions.push({ gridKey: `${key}-${r}-${c}`, quadrant: key, row: r, col: c });
+                }
+            }
+        }
+
+        if (plotPositions.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ success: false, message: 'No plots to create — check quadrant configuration' });
+        }
+
+        // Batch insert all plots in chunks of 50
+        const CHUNK = 50;
+        for (let i = 0; i < plotPositions.length; i += CHUNK) {
+            const chunk = plotPositions.slice(i, i + CHUNK);
+            const values = [];
+            const placeholders = [];
+            let idx = 1;
+
+            for (const p of chunk) {
+                placeholders.push(
+                    `($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++})`
+                );
+                values.push(
+                    mapId,
+                    req.user.site_id,
+                    p.gridKey,
+                    JSON.stringify([{ quadrant: p.quadrant, row: p.row, col: p.col }]),
+                    '#22c55e',
+                    'AVAILABLE',
+                    req.user.id,
+                    req.user.id
+                );
+            }
+
+            await client.query(
+                `INSERT INTO map_plots
+                     (colony_map_id, site_id, plot_number, polygon_points, fill_color, status, created_by, updated_by)
+                 VALUES ${placeholders.join(', ')}`,
+                values
+            );
+        }
+
+        await client.query('COMMIT');
+        res.status(201).json({ success: true, mapId, plotCount: plotPositions.length });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error('initializeLayout error:', err);
+        res.status(500).json({ success: false, message: 'Failed to create colony: ' + err.message });
+    } finally {
+        client.release();
     }
 };
