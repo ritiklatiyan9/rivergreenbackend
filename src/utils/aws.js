@@ -11,13 +11,14 @@ const s3Client = new S3Client({
 
 export const uploadToS3 = async (filePath, fileName, contentType) => {
   const fileContent = fs.readFileSync(filePath);
+  const bucket = process.env.AWS_S3_BUCKET_NAME;
   const params = {
-    Bucket: process.env.AWS_S3_BUCKET,
+    Bucket: bucket,
     Key: fileName,
     Body: fileContent,
     ContentType: contentType,
   };
   const command = new PutObjectCommand(params);
   await s3Client.send(command);
-  return `https://${process.env.AWS_S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${fileName}`;
+  return `https://${bucket}.s3.${process.env.AWS_REGION}.amazonaws.com/${fileName}`;
 };

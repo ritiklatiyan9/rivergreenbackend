@@ -211,7 +211,7 @@ export const updateProfile = asyncHandler(async (req, res) => {
   // Handle profile photo upload via multer
   if (req.file) {
     try {
-      const result = await uploadSingle(req.file, 'cloudinary');
+      const result = await uploadSingle(req.file, 's3');
       updateData.profile_photo = result.secure_url;
     } catch (err) {
       console.error('Profile photo upload error:', err);

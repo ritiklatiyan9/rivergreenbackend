@@ -12,7 +12,7 @@ export const createContent = asyncHandler(async (req, res) => {
   let fileName = null;
 
   if (req.file) {
-    const result = await uploadSingle(req.file, 'cloudinary');
+    const result = await uploadSingle(req.file, 's3');
     fileUrl = result.secure_url;
     fileName = req.file.originalname;
   }

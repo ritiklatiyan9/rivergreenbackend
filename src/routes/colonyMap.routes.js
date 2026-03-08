@@ -16,14 +16,16 @@ import {
     bulkSavePlots,
     getMapStats,
     getPublicPlot,
+    getPublicMap,
     initializeLayout,
     uploadMapImage,
 } from '../controllers/colonyMap.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import checkRole from '../middlewares/role.middleware.js';
 
-// Public Plot Route (for sharing)
+// Public Routes (for sharing — no auth)
 router.get('/public/plots/:plotId', getPublicPlot);
+router.get('/public/maps/:mapId', getPublicMap);
 
 // Read-only routes accessible by AGENT, TEAM_HEAD, ADMIN
 router.use(authMiddleware);

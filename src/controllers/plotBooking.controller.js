@@ -6,6 +6,7 @@ import userModel from '../models/User.model.js';
 import pool from '../config/db.js';
 import { bustCache } from '../middlewares/cache.middleware.js';
 import { randomUUID } from 'crypto';
+import { uploadMany } from '../utils/upload.js';
 
 // Helper
 const getSiteId = async (userId) => {
@@ -574,8 +575,12 @@ export const publicBookPlot = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'This plot already has an active booking' });
   }
 
-  // Collect screenshot file paths from multer
-  const screenshotUrls = (req.files || []).map(f => `/uploads/${f.filename}`);
+  // Upload screenshots to S3
+  let screenshotUrls = [];
+  if (req.files && req.files.length > 0) {
+    const results = await uploadMany(req.files, 's3');
+    screenshotUrls = results.map(r => r.secure_url);
+  }
 
   const dbClient = await pool.connect();
   try {

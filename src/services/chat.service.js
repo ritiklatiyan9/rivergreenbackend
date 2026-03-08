@@ -65,8 +65,8 @@ class ChatService {
     const isParticipant = await ChatConversation.isParticipant(conversationId, senderId, pool);
     if (!isParticipant) throw new Error('Not a participant of this conversation');
 
-    // Upload to Cloudinary
-    const result = await uploadSingle(file, 'cloudinary');
+    // Upload to S3
+    const result = await uploadSingle(file, 's3');
 
     const message = await ChatMessage.createMessage({
       conversation_id: conversationId,

@@ -1,6 +1,8 @@
 import pool from '../config/db.js';
 import ColonyMap from '../models/ColonyMap.model.js';
 import MapPlot from '../models/MapPlot.model.js';
+import { uploadSingle } from '../utils/upload.js';
+import financialSettingsModel from '../models/FinancialSettings.model.js';
 
 // ─── Upload Map Image ───────────────────────────────────────
 
@@ -9,7 +11,8 @@ export const uploadMapImage = async (req, res) => {
         if (!req.file) {
             return res.status(400).json({ success: false, message: 'No image file uploaded' });
         }
-        const imageUrl = `/uploads/${req.file.filename}`;
+        const result = await uploadSingle(req.file, 's3');
+        const imageUrl = result.secure_url;
         const map = await ColonyMap.update(req.params.id, { image_url: imageUrl }, pool);
         if (!map) return res.status(404).json({ success: false, message: 'Colony map not found' });
         res.json({ success: true, map, image_url: imageUrl });
@@ -248,6 +251,79 @@ export const getPlot = async (req, res) => {
     }
 };
 
+export const getPublicMap = async (req, res) => {
+    try {
+        const { mapId } = req.params;
+
+        // Fetch the colony map (no auth)
+        const mapRes = await pool.query(
+            `SELECT id, site_id, name, image_url, layout_config FROM colony_maps WHERE id = $1`,
+            [mapId]
+        );
+        if (mapRes.rows.length === 0) {
+            return res.status(404).json({ success: false, message: 'Colony map not found' });
+        }
+        const map = mapRes.rows[0];
+
+        // Fetch all plots for this map (public-safe fields only)
+        const plotsRes = await pool.query(
+            `SELECT id, plot_number, polygon_points, fill_color, status,
+                    area_sqft, dimensions, facing, total_price, price_per_sqft,
+                    block, plot_type
+             FROM map_plots WHERE colony_map_id = $1`,
+            [mapId]
+        );
+
+        // If ?ref= sponsor_code is provided, look up the agent
+        let referringAgent = null;
+        const refCode = req.query.ref;
+        if (refCode) {
+            const agentRes = await pool.query(
+                `SELECT id, name, sponsor_code, phone, profile_photo FROM users WHERE UPPER(sponsor_code) = UPPER($1) AND is_active = true`,
+                [refCode]
+            );
+            if (agentRes.rows.length > 0) {
+                const a = agentRes.rows[0];
+                referringAgent = { id: a.id, name: a.name, sponsor_code: a.sponsor_code, phone: a.phone, profile_photo: a.profile_photo };
+            }
+        }
+
+        // Fetch financial settings for this site
+        let financialSettings = null;
+        if (map.site_id) {
+            const fs = await financialSettingsModel.findBySite(map.site_id, pool);
+            if (fs) {
+                financialSettings = {
+                    bank_name: fs.bank_name,
+                    account_holder_name: fs.account_holder_name,
+                    account_number: fs.account_number,
+                    ifsc_code: fs.ifsc_code,
+                    bank_branch: fs.bank_branch,
+                    upi_id: fs.upi_id,
+                    upi_scanner_url: fs.upi_scanner_url,
+                    payment_instructions: fs.payment_instructions,
+                };
+            }
+        }
+
+        res.json({
+            success: true,
+            colonyData: {
+                id: map.id,
+                name: map.name,
+                image_url: map.image_url || null,
+                layout_config: map.layout_config,
+                plots: plotsRes.rows,
+            },
+            referringAgent,
+            financialSettings,
+        });
+    } catch (err) {
+        console.error('getPublicMap error:', err);
+        res.status(500).json({ success: false, message: 'Failed to fetch colony map' });
+    }
+};
+
 export const getPublicPlot = async (req, res) => {
     try {
         // Find plot by ID (no auth required for this shared view)
@@ -300,7 +376,25 @@ export const getPublicPlot = async (req, res) => {
             }
         }
 
-        res.json({ success: true, plot: safePlot, referringAgent, colonyData });
+        // Fetch financial settings for this site
+        let financialSettings = null;
+        if (plot.site_id) {
+            const fs = await financialSettingsModel.findBySite(plot.site_id, pool);
+            if (fs) {
+                financialSettings = {
+                    bank_name: fs.bank_name,
+                    account_holder_name: fs.account_holder_name,
+                    account_number: fs.account_number,
+                    ifsc_code: fs.ifsc_code,
+                    bank_branch: fs.bank_branch,
+                    upi_id: fs.upi_id,
+                    upi_scanner_url: fs.upi_scanner_url,
+                    payment_instructions: fs.payment_instructions,
+                };
+            }
+        }
+
+        res.json({ success: true, plot: safePlot, referringAgent, colonyData, financialSettings });
     } catch (err) {
         console.error('getPublicPlot error:', err);
         res.status(500).json({ success: false, message: 'Failed to fetch plot' });

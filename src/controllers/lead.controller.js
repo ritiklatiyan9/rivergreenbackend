@@ -41,7 +41,7 @@ export const createLead = asyncHandler(async (req, res) => {
     let photoUrl = null;
     if (req.file) {
         try {
-            const result = await uploadSingle(req.file, 'cloudinary');
+            const result = await uploadSingle(req.file, 's3');
             photoUrl = result.secure_url;
         } catch (err) {
             console.error('Lead photo upload error:', err);
@@ -182,7 +182,7 @@ export const updateLead = asyncHandler(async (req, res) => {
     // Handle photo upload
     if (req.file) {
         try {
-            const result = await uploadSingle(req.file, 'cloudinary');
+            const result = await uploadSingle(req.file, 's3');
             updateData.photo_url = result.secure_url;
         } catch (err) {
             console.error('Lead photo upload error:', err);
