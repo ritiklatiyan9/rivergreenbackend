@@ -20,6 +20,7 @@ import contentShareRoutes from './contentShare.routes.js';
 import attendanceRoutes from './attendance.routes.js';
 import chatRoutes from './chat.routes.js';
 import financialSettingsRoutes from './financialSettings.routes.js';
+import contactRoutes from './contact.routes.js';
 
 router.use('/auth', authRoutes);
 router.use('/upload', uploadRoutes);
@@ -40,5 +41,6 @@ router.use('/content-share', contentShareRoutes);
 router.use('/attendance', attendanceRoutes);
 router.use('/chat', chatRoutes);
 router.use('/financial-settings', financialSettingsRoutes);
+router.use('/contacts', contactRoutes);
 
 export default router;

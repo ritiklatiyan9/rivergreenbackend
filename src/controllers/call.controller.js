@@ -426,7 +426,7 @@ export const getLeadsForDialer = asyncHandler(async (req, res) => {
     }
 
     const scope = getScopeFilters(req.user, dbUser);
-    const { page, limit, search, status } = req.query;
+    const { page, limit, search, status, lead_category } = req.query;
 
     const result = await callModel.getLeadsForDialer({
         siteId: scope.siteId,
@@ -434,6 +434,7 @@ export const getLeadsForDialer = asyncHandler(async (req, res) => {
         teamId: scope.teamId,
         search,
         status,
+        leadCategory: lead_category,
         page: parseInt(page) || 1,
         limit: parseInt(limit) || 25,
     }, pool);
@@ -495,7 +496,7 @@ export const quickLogCall = asyncHandler(async (req, res) => {
 // ============================================================
 export const endCallSession = asyncHandler(async (req, res) => {
     const { id } = req.params;
-    const { outcome_id, next_action, customer_notes } = req.body;
+    const { outcome_id, next_action, customer_notes, lead_category } = req.body;
 
     const existing = await callModel.findById(id, pool);
     if (!existing) {
@@ -519,7 +520,15 @@ export const endCallSession = asyncHandler(async (req, res) => {
         call_status: 'COMPLETED',
     }, pool);
 
+    // Update lead_category if provided
+    const VALID_CATEGORIES = ['PRIME', 'HOT', 'NORMAL', 'COLD', 'DEAD'];
+    if (lead_category !== undefined && existing.lead_id) {
+        const catValue = (lead_category && VALID_CATEGORIES.includes(lead_category)) ? lead_category : null;
+        await pool.query('UPDATE leads SET lead_category = $1, updated_at = NOW() WHERE id = $2', [catValue, existing.lead_id]);
+    }
+
     bustCache('cache:*:/api/calls*');
+    bustCache('cache:*:/api/leads*');
 
     res.json({ success: true, call: updatedCall });
 });

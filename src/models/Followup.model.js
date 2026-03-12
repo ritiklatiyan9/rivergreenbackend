@@ -6,7 +6,7 @@ class FollowupModel extends MasterModel {
     }
 
     // Paginated, filterable followups
-    async findWithDetails({ siteId, assignedTo, teamId, status, followupType, dateFrom, dateTo, page = 1, limit = 20 }, pool) {
+    async findWithDetails({ siteId, assignedTo, teamId, status, followupType, dateFrom, dateTo, leadCategory, page = 1, limit = 20 }, pool) {
         const conditions = ['f.site_id = $1'];
         const params = [siteId];
         let idx = 2;
@@ -40,6 +40,10 @@ class FollowupModel extends MasterModel {
             conditions.push(`f.scheduled_at <= $${idx++}`);
             params.push(dateTo);
         }
+        if (leadCategory && leadCategory !== 'ALL') {
+            conditions.push(`l.lead_category = $${idx++}`);
+            params.push(leadCategory);
+        }
 
         const where = conditions.join(' AND ');
         const offset = (page - 1) * limit;
@@ -48,6 +52,7 @@ class FollowupModel extends MasterModel {
       SELECT COUNT(*) as total
       FROM ${this.tableName} f
       JOIN users u_agent ON f.assigned_to = u_agent.id
+      LEFT JOIN leads l ON f.lead_id = l.id
       WHERE ${where}
     `;
         const countResult = await pool.query(countQuery, params);
@@ -55,7 +60,7 @@ class FollowupModel extends MasterModel {
 
         const query = `
       SELECT f.*,
-        l.name as lead_name, l.phone as lead_phone,
+        l.name as lead_name, l.phone as lead_phone, l.lead_category,
         u_agent.name as agent_name, u_agent.email as agent_email,
         u_esc.name as escalated_to_name,
         c.call_type
@@ -78,11 +83,12 @@ class FollowupModel extends MasterModel {
     }
 
     // Get scheduled (pending + snoozed for future)
-    async findScheduled({ siteId, assignedTo, teamId, page = 1, limit = 20 }, pool) {
+    async findScheduled({ siteId, assignedTo, teamId, leadCategory, page = 1, limit = 20 }, pool) {
         return this.findWithDetails({
             siteId,
             assignedTo,
             teamId,
+            leadCategory,
             status: ['PENDING', 'SNOOZED'],
             page,
             limit,
@@ -90,7 +96,7 @@ class FollowupModel extends MasterModel {
     }
 
     // Get missed (past-due PENDING items)
-    async findMissed({ siteId, assignedTo, teamId, page = 1, limit = 20 }, pool) {
+    async findMissed({ siteId, assignedTo, teamId, leadCategory, page = 1, limit = 20 }, pool) {
         const conditions = ['f.site_id = $1', 'f.status = \'PENDING\'', 'f.scheduled_at < NOW()'];
         const params = [siteId];
         let idx = 2;
@@ -103,6 +109,10 @@ class FollowupModel extends MasterModel {
             conditions.push(`u_agent.team_id = $${idx++}`);
             params.push(teamId);
         }
+        if (leadCategory && leadCategory !== 'ALL') {
+            conditions.push(`l.lead_category = $${idx++}`);
+            params.push(leadCategory);
+        }
 
         const where = conditions.join(' AND ');
         const offset = (page - 1) * limit;
@@ -111,6 +121,7 @@ class FollowupModel extends MasterModel {
       SELECT COUNT(*) as total
       FROM ${this.tableName} f
       JOIN users u_agent ON f.assigned_to = u_agent.id
+      LEFT JOIN leads l ON f.lead_id = l.id
       WHERE ${where}
     `;
         const countResult = await pool.query(countQuery, params);
@@ -118,7 +129,7 @@ class FollowupModel extends MasterModel {
 
         const query = `
       SELECT f.*,
-        l.name as lead_name, l.phone as lead_phone,
+        l.name as lead_name, l.phone as lead_phone, l.lead_category,
         u_agent.name as agent_name, u_agent.email as agent_email,
         u_esc.name as escalated_to_name,
         c.call_type

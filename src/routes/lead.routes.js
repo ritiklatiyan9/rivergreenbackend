@@ -7,6 +7,7 @@ import {
     updateLead,
     deleteLead,
     getLead,
+    getLeadFullDetails,
     bulkUploadLeads,
     getBulkJobStatus,
     assignLead,
@@ -65,6 +66,7 @@ router.get('/assignment-history', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWN
 router.post('/bulk-assign', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), bulkAssignLeads);
 
 // Single lead routes
+router.get('/:id/full', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), getLeadFullDetails);
 router.get('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), getLead);
 router.put('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), upload.single('photo'), updateLead);
 router.delete('/:id', checkRole(['TEAM_HEAD', 'ADMIN', 'OWNER']), deleteLead);

@@ -269,7 +269,7 @@ class CallModel extends MasterModel {
   }
 
   // ── Leads Dialer: All leads with phone, last call info, scoped ──
-  async getLeadsForDialer({ siteId, assignedTo, teamId, search, status, page = 1, limit = 25 }, pool) {
+  async getLeadsForDialer({ siteId, assignedTo, teamId, search, status, leadCategory, page = 1, limit = 25 }, pool) {
     const conditions = ['l.site_id = $1'];
     const params = [siteId];
     let idx = 2;
@@ -285,6 +285,10 @@ class CallModel extends MasterModel {
     if (status && status !== 'ALL') {
       conditions.push(`l.status = $${idx++}`);
       params.push(status);
+    }
+    if (leadCategory && leadCategory !== 'ALL') {
+      conditions.push(`l.lead_category = $${idx++}`);
+      params.push(leadCategory);
     }
     if (search) {
       conditions.push(`(l.name ILIKE $${idx} OR l.phone ILIKE $${idx})`);
@@ -306,7 +310,7 @@ class CallModel extends MasterModel {
 
     const query = `
       SELECT
-        l.id, l.name, l.phone, l.email, l.status, l.assigned_to, l.created_at,
+        l.id, l.name, l.phone, l.email, l.status, l.lead_category, l.assigned_to, l.created_at,
         u_agent.name as agent_name,
         lc.last_call_at,
         lc.total_calls,

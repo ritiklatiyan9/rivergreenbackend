@@ -1,6 +1,7 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import leadModel from '../models/Lead.model.js';
 import userModel from '../models/User.model.js';
+import callModel from '../models/Call.model.js';
 import pool from '../config/db.js';
 import { bustCache } from '../middlewares/cache.middleware.js';
 import { read as xlsxRead, utils as xlsxUtils } from 'xlsx';
@@ -99,7 +100,8 @@ export const getLeads = asyncHandler(async (req, res) => {
     const filters = {
         site_id: siteId,
         status: req.query.status,
-        search: req.query.search
+        search: req.query.search,
+        lead_category: req.query.lead_category,
     };
 
     // Agents & Team Heads see only leads they own or are assigned to
@@ -156,7 +158,7 @@ export const getLead = asyncHandler(async (req, res) => {
 // ============================================================
 export const updateLead = asyncHandler(async (req, res) => {
     const { id } = req.params;
-    const { name, phone, email, address, profession, status, assigned_to, notes } = req.body;
+    const { name, phone, email, address, profession, status, assigned_to, notes, lead_category } = req.body;
 
     const siteId = await getSiteId(req.user.id);
     const existingLead = await leadModel.findById(id, pool);
@@ -170,6 +172,7 @@ export const updateLead = asyncHandler(async (req, res) => {
         return res.status(403).json({ success: false, message: 'Not authorized to update this lead' });
     }
 
+    const VALID_CATEGORIES = ['PRIME', 'HOT', 'NORMAL', 'COLD', 'DEAD'];
     const updateData = {};
     if (name !== undefined) updateData.name = name;
     if (phone !== undefined) updateData.phone = phone || null;
@@ -178,6 +181,9 @@ export const updateLead = asyncHandler(async (req, res) => {
     if (profession !== undefined) updateData.profession = profession || null;
     if (status !== undefined) updateData.status = status;
     if (notes !== undefined) updateData.notes = notes || null;
+    if (lead_category !== undefined) {
+        updateData.lead_category = (lead_category && VALID_CATEGORIES.includes(lead_category)) ? lead_category : null;
+    }
 
     // Handle photo upload
     if (req.file) {
@@ -387,6 +393,55 @@ export const getAssignableUsers = asyncHandler(async (req, res) => {
     );
 
     res.json({ success: true, users: result.rows });
+});
+
+// ============================================================
+// GET LEAD FULL DETAILS (lead + call history + followups)
+// ============================================================
+export const getLeadFullDetails = asyncHandler(async (req, res) => {
+    const siteId = await getSiteId(req.user.id);
+    if (!siteId) {
+        return res.status(404).json({ success: false, message: 'No site assigned' });
+    }
+
+    const lead = await leadModel.findById(req.params.id, pool);
+    if (!lead || lead.site_id !== siteId) {
+        return res.status(404).json({ success: false, message: 'Lead not found' });
+    }
+
+    if ((req.user.role === 'AGENT' || req.user.role === 'TEAM_HEAD') &&
+        lead.owner_id !== req.user.id && lead.assigned_to !== req.user.id) {
+        return res.status(403).json({ success: false, message: 'Not authorized to view this lead' });
+    }
+
+    const assignee = lead.assigned_to ? await userModel.findById(lead.assigned_to, pool) : null;
+    const owner = lead.owner_id ? await userModel.findById(lead.owner_id, pool) : null;
+
+    // Get call history
+    const calls = await callModel.findByLead(req.params.id, pool);
+
+    // Get followups/appointments
+    const followupsResult = await pool.query(
+        `SELECT f.*, u_agent.name as agent_name, co.label as outcome_label
+         FROM followups f
+         LEFT JOIN users u_agent ON f.assigned_to = u_agent.id
+         LEFT JOIN calls c ON f.call_id = c.id
+         LEFT JOIN call_outcomes co ON c.outcome_id = co.id
+         WHERE f.lead_id = $1
+         ORDER BY f.scheduled_at DESC`,
+        [req.params.id]
+    );
+
+    res.json({
+        success: true,
+        lead: {
+            ...lead,
+            assigned_to_name: assignee ? assignee.name : null,
+            owner_name: owner ? owner.name : null,
+        },
+        calls,
+        followups: followupsResult.rows,
+    });
 });
 
 // ============================================================

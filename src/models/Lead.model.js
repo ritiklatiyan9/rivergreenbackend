@@ -57,6 +57,11 @@ class LeadModel extends MasterModel {
             params.push(filters.status);
         }
 
+        if (filters.lead_category) {
+            whereClauses.push(`l.lead_category = $${paramIndex++}`);
+            params.push(filters.lead_category);
+        }
+
         if (filters.search) {
             whereClauses.push(`(l.name ILIKE $${paramIndex} OR l.phone ILIKE $${paramIndex} OR l.email ILIKE $${paramIndex})`);
             params.push(`%${filters.search}%`);
