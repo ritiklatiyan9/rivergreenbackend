@@ -431,7 +431,7 @@ export const bulkUploadLeads = asyncHandler(async (req, res) => {
         return res.status(400).json({ success: false, message: 'Excel file is empty or has no data rows' });
     }
 
-    const normalise = (key) => key.toLowerCase().replace(/[\s_]/g, '');
+    const normalise = (key) => key.toLowerCase().replace(/[\s_*()\[\]#@!?:;,.-]/g, '');
     const validatedLeads = [];
     const invalidRows = [];
 
@@ -444,14 +444,13 @@ export const bulkUploadLeads = asyncHandler(async (req, res) => {
         const name = row['name'] || row['fullname'] || row['leadname'] || '';
         const phone = row['phone'] || row['mobile'] || row['contact'] || row['phonenumber'] || '';
 
-        if (!name) { invalidRows.push({ row: i + 2, reason: 'Name is required', data: rawRow }); return; }
         if (!phone) { invalidRows.push({ row: i + 2, reason: 'Phone is required', data: rawRow }); return; }
 
         const statusRaw = (row['status'] || '').toUpperCase();
         const status = VALID_STATUSES.includes(statusRaw) ? statusRaw : 'NEW';
 
         validatedLeads.push({
-            name,
+            name: name || 'Unknown',
             phone,
             email: row['email'] || row['emailaddress'] || null,
             address: row['address'] || row['location'] || null,
@@ -464,7 +463,7 @@ export const bulkUploadLeads = asyncHandler(async (req, res) => {
     if (!validatedLeads.length) {
         return res.status(400).json({
             success: false,
-            message: 'No valid rows found. Name and Phone are required for every row.',
+            message: 'No valid rows found. Phone is required for every row.',
             invalidRows: invalidRows.slice(0, 20),
         });
     }

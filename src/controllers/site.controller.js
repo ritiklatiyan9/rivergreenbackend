@@ -329,6 +329,42 @@ export const getAgents = asyncHandler(async (req, res) => {
   res.json({ success: true, agents });
 });
 
+// Search users by name or phone within admin's site
+export const searchSiteUsers = asyncHandler(async (req, res) => {
+  const { q, limit = 8 } = req.query;
+  const term = String(q ?? '').trim();
+
+  if (term.length < 2) {
+    return res.json({ success: true, users: [] });
+  }
+
+  // Clamp limit between 1 and 20 to prevent abuse
+  const limitVal = Math.min(Math.max(1, parseInt(limit, 10) || 8), 20);
+
+  const adminUser = await userModel.findById(req.user.id, pool);
+  if (!adminUser || !adminUser.site_id) {
+    return res.status(404).json({ success: false, message: 'No site assigned' });
+  }
+
+  const likeTerm  = `%${term}%`;   // contains match
+  const startTerm = `${term}%`;    // starts-with (for ranking)
+
+  const result = await pool.query(
+    `SELECT id, name, email, phone, role, profile_photo, sponsor_code, is_active, team_id, created_at
+     FROM users
+     WHERE site_id = $1
+       AND role != 'ADMIN'
+       AND (name ILIKE $2 OR phone ILIKE $2)
+     ORDER BY
+       CASE WHEN name ILIKE $3 THEN 0 ELSE 1 END,
+       name
+     LIMIT $4`,
+    [adminUser.site_id, likeTerm, startTerm, limitVal]
+  );
+
+  res.json({ success: true, users: result.rows });
+});
+
 // Get leads for dropdowns (call module)
 export const getLeads = asyncHandler(async (req, res) => {
   const adminUser = await userModel.findById(req.user.id, pool);

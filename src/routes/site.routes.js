@@ -5,6 +5,7 @@ import {
   getMySite,
   getSiteStats,
   listSiteUsers,
+  searchSiteUsers,
   createSiteUser,
   getSiteUser,
   updateSiteUser,
@@ -27,6 +28,7 @@ router.get('/stats', cacheMiddleware(300), getSiteStats);
 
 // User management within site
 router.get('/users', cacheMiddleware(300), listSiteUsers);
+router.get('/users/search', searchSiteUsers);        // must be before /:id
 router.post('/users', createSiteUser);
 router.get('/users/:id', cacheMiddleware(300), getSiteUser);
 router.put('/users/:id', updateSiteUser);
