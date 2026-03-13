@@ -88,10 +88,12 @@ export const getScheduledFollowups = asyncHandler(async (req, res) => {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
 
-    const { page, limit, lead_category } = req.query;
+    const { page, limit, lead_category, date_from, date_to } = req.query;
     const result = await followupModel.findScheduled({
         ...scope,
         leadCategory: lead_category,
+        dateFrom: date_from,
+        dateTo: date_to,
         page: parseInt(page) || 1,
         limit: parseInt(limit) || 20,
     }, pool);
@@ -108,10 +110,12 @@ export const getMissedFollowups = asyncHandler(async (req, res) => {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
 
-    const { page, limit, lead_category } = req.query;
+    const { page, limit, lead_category, date_from, date_to } = req.query;
     const result = await followupModel.findMissed({
         ...scope,
         leadCategory: lead_category,
+        dateFrom: date_from,
+        dateTo: date_to,
         page: parseInt(page) || 1,
         limit: parseInt(limit) || 20,
     }, pool);

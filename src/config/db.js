@@ -18,9 +18,17 @@ const pool = new Pool({
   user: dbUser,
   password: dbPassword,
   ssl: sslOption,
-  max: 20,
-  idleTimeoutMillis: 30000,
+  max: 10,
+  idleTimeoutMillis: 20000,
   connectionTimeoutMillis: 10000,
+  allowExitOnIdle: false,
+});
+
+// Neon (and other serverless DBs) silently terminate idle connections.
+// Without this handler the unhandled 'error' event on the pool crashes Node.
+pool.on('error', (err, client) => {
+  console.error('[pg-pool] Idle client error — connection was terminated by server:', err.message);
+  // Do NOT re-throw — let the pool remove and replace the dead client automatically.
 });
 
 export const connectDB = async () => {

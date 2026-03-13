@@ -130,12 +130,13 @@ export const getCalls = asyncHandler(async (req, res) => {
     }
 
     const scope = getScopeFilters(req.user, dbUser);
-    const { page, limit, lead_id, outcome_id, date_from, date_to } = req.query;
+    const { page, limit, lead_id, outcome_id, lead_category, date_from, date_to } = req.query;
 
     const result = await callModel.findWithDetails({
         ...scope,
         leadId: lead_id,
         outcomeId: outcome_id,
+        leadCategory: lead_category,
         dateFrom: date_from,
         dateTo: date_to,
         page: parseInt(page) || 1,
@@ -496,7 +497,7 @@ export const quickLogCall = asyncHandler(async (req, res) => {
 // ============================================================
 export const endCallSession = asyncHandler(async (req, res) => {
     const { id } = req.params;
-    const { outcome_id, next_action, customer_notes, lead_category } = req.body;
+    const { outcome_id, next_action, customer_notes, lead_category, duration_seconds } = req.body;
 
     const existing = await callModel.findById(id, pool);
     if (!existing) {
@@ -509,7 +510,10 @@ export const endCallSession = asyncHandler(async (req, res) => {
 
     const callEnd = new Date();
     const callStart = new Date(existing.call_start);
-    const durationSeconds = Math.max(0, Math.floor((callEnd - callStart) / 1000));
+    const parsedDuration = Number(duration_seconds);
+    const durationSeconds = Number.isFinite(parsedDuration) && parsedDuration >= 0
+        ? Math.floor(parsedDuration)
+        : Math.max(0, Math.floor((callEnd - callStart) / 1000));
 
     const updatedCall = await callModel.endCall(id, {
         call_end: callEnd.toISOString(),

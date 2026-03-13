@@ -6,7 +6,7 @@ class CallModel extends MasterModel {
   }
 
   // List calls with joined data — paginated, filterable, role-scoped
-  async findWithDetails({ siteId, assignedTo, teamId, leadId, outcomeId, dateFrom, dateTo, page = 1, limit = 20 }, pool) {
+  async findWithDetails({ siteId, assignedTo, teamId, leadId, outcomeId, leadCategory, dateFrom, dateTo, page = 1, limit = 20 }, pool) {
     const conditions = ['c.site_id = $1'];
     const params = [siteId];
     let idx = 2;
@@ -26,6 +26,10 @@ class CallModel extends MasterModel {
     if (outcomeId) {
       conditions.push(`c.outcome_id = $${idx++}`);
       params.push(outcomeId);
+    }
+    if (leadCategory && leadCategory !== 'ALL') {
+      conditions.push(`l.lead_category = $${idx++}`);
+      params.push(leadCategory);
     }
     if (dateFrom) {
       conditions.push(`c.call_start >= $${idx++}`);
@@ -50,7 +54,7 @@ class CallModel extends MasterModel {
 
     const query = `
       SELECT c.*,
-        l.name as lead_name, l.phone as lead_phone, l.status as lead_status,
+        l.name as lead_name, l.phone as lead_phone, l.status as lead_status, l.lead_category,
         u_agent.name as agent_name, u_agent.email as agent_email,
         co.label as outcome_label, co.requires_followup
       FROM ${this.tableName} c

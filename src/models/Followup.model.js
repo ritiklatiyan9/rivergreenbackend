@@ -83,12 +83,14 @@ class FollowupModel extends MasterModel {
     }
 
     // Get scheduled (pending + snoozed for future)
-    async findScheduled({ siteId, assignedTo, teamId, leadCategory, page = 1, limit = 20 }, pool) {
+    async findScheduled({ siteId, assignedTo, teamId, leadCategory, dateFrom, dateTo, page = 1, limit = 20 }, pool) {
         return this.findWithDetails({
             siteId,
             assignedTo,
             teamId,
             leadCategory,
+            dateFrom,
+            dateTo,
             status: ['PENDING', 'SNOOZED'],
             page,
             limit,
@@ -96,7 +98,7 @@ class FollowupModel extends MasterModel {
     }
 
     // Get missed (past-due PENDING items)
-    async findMissed({ siteId, assignedTo, teamId, leadCategory, page = 1, limit = 20 }, pool) {
+    async findMissed({ siteId, assignedTo, teamId, leadCategory, dateFrom, dateTo, page = 1, limit = 20 }, pool) {
         const conditions = ['f.site_id = $1', 'f.status = \'PENDING\'', 'f.scheduled_at < NOW()'];
         const params = [siteId];
         let idx = 2;
@@ -112,6 +114,14 @@ class FollowupModel extends MasterModel {
         if (leadCategory && leadCategory !== 'ALL') {
             conditions.push(`l.lead_category = $${idx++}`);
             params.push(leadCategory);
+        }
+        if (dateFrom) {
+            conditions.push(`f.scheduled_at >= $${idx++}`);
+            params.push(dateFrom);
+        }
+        if (dateTo) {
+            conditions.push(`f.scheduled_at <= $${idx++}`);
+            params.push(dateTo);
         }
 
         const where = conditions.join(' AND ');
