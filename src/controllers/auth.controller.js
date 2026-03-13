@@ -8,7 +8,7 @@ const REFRESH_COOKIE_OPTIONS = {
   httpOnly: true,
   secure: process.env.NODE_ENV === 'production',
   sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-  maxAge: 7 * 24 * 60 * 60 * 1000,   // 7 days
+  maxAge: 30 * 24 * 60 * 60 * 1000,
   path: '/',
 };
 
@@ -23,6 +23,11 @@ const CLEAR_COOKIE_OPTIONS = {
 const sanitizeUser = (user) => {
   const { password, refresh_token, token_version, ...safe } = user;
   return safe;
+};
+
+const readRefreshToken = (req) => {
+  const headerToken = req.get('x-refresh-token');
+  return req.cookies?.refreshToken || req.body?.refreshToken || headerToken || null;
 };
 
 // Register owner via Postman
@@ -94,7 +99,7 @@ export const login = asyncHandler(async (req, res) => {
   await userModel.update(user.id, { refresh_token: hashedRefresh }, pool);
 
   res.cookie('refreshToken', refreshToken, REFRESH_COOKIE_OPTIONS);
-  res.json({ success: true, user: sanitizeUser(user), accessToken });
+  res.json({ success: true, user: sanitizeUser(user), accessToken, refreshToken });
 });
 
 // In-flight refresh lock per user — prevents token-version race when two
@@ -103,7 +108,7 @@ const _refreshLocks = new Map();
 
 // Refresh Token
 export const refresh = asyncHandler(async (req, res) => {
-  const refreshToken = req.cookies?.refreshToken;
+  const refreshToken = readRefreshToken(req);
   if (!refreshToken) {
     return res.status(401).json({ success: false, message: 'No refresh token' });
   }
@@ -121,7 +126,7 @@ export const refresh = asyncHandler(async (req, res) => {
       const result = await _refreshLocks.get(decoded.id);
       // Second caller piggy-backs on the first caller's result
       res.cookie('refreshToken', result.newRefreshToken, REFRESH_COOKIE_OPTIONS);
-      return res.json({ success: true, accessToken: result.accessToken });
+      return res.json({ success: true, accessToken: result.accessToken, refreshToken: result.newRefreshToken });
     } catch {
       return res.status(401).json({ success: false, message: 'Refresh failed (concurrent)' });
     }
@@ -164,7 +169,7 @@ export const refresh = asyncHandler(async (req, res) => {
   try {
     const result = await work;
     res.cookie('refreshToken', result.newRefreshToken, REFRESH_COOKIE_OPTIONS);
-    res.json({ success: true, accessToken: result.accessToken });
+    res.json({ success: true, accessToken: result.accessToken, refreshToken: result.newRefreshToken });
   } catch (err) {
     return res.status(401).json({ success: false, message: 'Invalid refresh token' });
   } finally {
