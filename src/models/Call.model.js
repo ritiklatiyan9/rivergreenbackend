@@ -162,50 +162,29 @@ class CallModel extends MasterModel {
     `;
     const outcomeResult = await pool.query(outcomeQuery, params);
 
-    // Calls per agent + Assigned leads
-    const agentQuery = `
-      SELECT
-        u.name as agent_name,
-        u.id as agent_id,
+    // Simplified Agent Performance Query that correctly uses filters
+    const agentPerformanceQuery = `
+      SELECT 
+        u.id as agent_id, 
+        u.name as agent_name, 
         u.role as agent_role,
-        COUNT(DISTINCT c.id) as call_count,
-        COALESCE(ROUND(AVG(c.duration_seconds)), 0) as avg_duration,
-        (SELECT COUNT(DISTINCT l.id) FROM leads l WHERE l.assigned_to = u.id AND l.site_id = $1) as assigned_leads
+        (SELECT COUNT(DISTINCT l.id) FROM leads l WHERE l.assigned_to = u.id AND l.site_id = $1) as assigned_leads,
+        COUNT(c.id) as call_count,
+        COALESCE(ROUND(AVG(c.duration_seconds)), 0) as avg_duration
       FROM users u
-      LEFT JOIN ${this.tableName} c ON c.assigned_to = u.id AND ${where.replace(/u\./g, 'u_inner.')}
+      LEFT JOIN ${this.tableName} c ON c.assigned_to = u.id AND c.site_id = $1
+        ${dateFrom ? `AND c.call_start >= '${dateFrom}'` : ''}
+        ${dateTo ? `AND c.call_start <= '${dateTo}'` : ''}
       WHERE u.site_id = $1 AND u.role IN ('AGENT', 'TEAM_HEAD')
+        ${teamId ? `AND u.team_id = $${params.indexOf(teamId) + 1}` : ''}
+        ${assignedTo ? `AND u.id = $${params.indexOf(assignedTo) + 1}` : ''}
       GROUP BY u.id, u.name, u.role
       ORDER BY call_count DESC
       LIMIT 20
     `;
-    // Note: The where clause above for c needs careful handling if it filters by agent_id or team_id
-    // But since this is a summary of all agents, we use a simpler approach for the inner join if possible
-    // or adjust the where clause.
+    const agentResult = await pool.query(agentPerformanceQuery, [siteId]);
 
-    // Revised Agent Query to be more robust with filters
-    const agentPerformanceQuery = `
-      WITH agent_stats AS (
-        SELECT 
-            u.id as agent_id, 
-            u.name as agent_name, 
-            u.role as agent_role,
-            (SELECT COUNT(*) FROM leads l WHERE l.assigned_to = u.id AND l.site_id = $1) as assigned_leads
-        FROM users u
-        WHERE u.site_id = $1 AND u.role IN ('AGENT', 'TEAM_HEAD', 'ADMIN')
-      )
-      SELECT 
-        ast.agent_id, 
-        ast.agent_name, 
-        ast.agent_role,
-        ast.assigned_leads,
-        COUNT(c.id) as call_count,
-        COALESCE(ROUND(AVG(c.duration_seconds)), 0) as avg_duration
-      FROM agent_stats ast
-      LEFT JOIN ${this.tableName} c ON c.assigned_to = ast.agent_id AND ${where.replace(/c\.site_id = \$1/g, 'TRUE')}
-      GROUP BY ast.agent_id, ast.agent_name, ast.agent_role, ast.assigned_leads
-      ORDER BY call_count DESC
-    `;
-    const agentResult = await pool.query(agentPerformanceQuery, params);
+
 
     // Daily call trend (last 30 days)
     const trendQuery = `

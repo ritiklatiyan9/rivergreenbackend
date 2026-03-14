@@ -135,6 +135,7 @@ export const refresh = asyncHandler(async (req, res) => {
   const work = (async () => {
     const user = await userModel.findById(decoded.id, pool);
     if (!user || user.token_version !== decoded.version) {
+      console.warn(`[Auth] Version mismatch for user ${decoded.id}. Expected ${decoded.version}, found ${user?.token_version}`);
       if (user) await userModel.update(user.id, { token_version: (user.token_version || 0) + 1, refresh_token: null }, pool);
       res.clearCookie('refreshToken', CLEAR_COOKIE_OPTIONS);
       throw new Error('version_mismatch');

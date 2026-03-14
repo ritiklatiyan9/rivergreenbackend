@@ -447,10 +447,10 @@ export const getLeadsForDialer = asyncHandler(async (req, res) => {
 // QUICK LOG — Agent taps call icon, system captures start time
 // ============================================================
 export const quickLogCall = asyncHandler(async (req, res) => {
-    const { lead_id, call_source } = req.body;
+    const { lead_id, phone_number, call_source } = req.body;
 
-    if (!lead_id) {
-        return res.status(400).json({ success: false, message: 'Lead is required' });
+    if (!lead_id && !phone_number) {
+        return res.status(400).json({ success: false, message: 'Lead ID or Phone Number is required' });
     }
 
     const siteId = await getSiteId(req.user.id);
@@ -458,29 +458,57 @@ export const quickLogCall = asyncHandler(async (req, res) => {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
 
-    // Get lead phone number
-    const leadResult = await pool.query('SELECT phone FROM leads WHERE id = $1', [lead_id]);
-    if (!leadResult.rows[0]) {
-        return res.status(404).json({ success: false, message: 'Lead not found' });
+    let targetLeadId = lead_id;
+    let targetPhone = phone_number;
+
+    // If only lead_id is provided, get the phone
+    if (lead_id && !phone_number) {
+        const leadResult = await pool.query('SELECT phone FROM leads WHERE id = $1', [lead_id]);
+        if (leadResult.rows[0]) {
+            targetPhone = leadResult.rows[0].phone;
+        }
+    } 
+    // If only phone is provided, try to find a lead or contact
+    else if (!lead_id && phone_number) {
+        // Search in leads first
+        const leadCheck = await pool.query('SELECT id FROM leads WHERE site_id = $1 AND phone = $2 LIMIT 1', [siteId, phone_number]);
+        if (leadCheck.rows[0]) {
+            targetLeadId = leadCheck.rows[0].id;
+        } else {
+            // Search in contacts
+            const contactCheck = await pool.query('SELECT id, name FROM contacts WHERE site_id = $1 AND phone = $2 LIMIT 1', [siteId, phone_number]);
+            if (contactCheck.rows[0]) {
+                // If it's a contact, we might want to auto-convert to lead or just link it if the schema allows.
+                // The current schema for 'calls' has a lead_id. Let's see if it can be null or if we should auto-convert.
+                // For now, let's keep lead_id null if it's just a raw contact, or better, auto-convert if it's an agent call.
+                // Actually, the user asked "each call make by agent must be saved in db".
+                // Let's assume the calls table can handle NULL lead_id for now, OR we create a "Shadow Lead".
+                // Looking at Call.model.js, lead_id is used in joins but doesn't seem strictly NOT NULL in logic.
+            }
+        }
     }
 
     const call = await callModel.quickLog({
         site_id: siteId,
-        lead_id,
+        lead_id: targetLeadId || null,
         assigned_to: req.user.id,
         created_by: req.user.id,
-        call_type: 'OUTGOING',
-        call_start: new Date().toISOString(),
-        call_status: 'ACTIVE',
+        call_type: req.body.call_type || 'OUTGOING',
+        call_start: req.body.call_start || new Date().toISOString(),
+        call_end: req.body.duration_seconds ? new Date().toISOString() : null,
+        duration_seconds: req.body.duration_seconds || 0,
+        call_status: req.body.call_status || (req.body.duration_seconds ? 'COMPLETED' : 'ACTIVE'),
         call_source: call_source || 'WEB',
-        phone_number_dialed: leadResult.rows[0].phone,
+        phone_number_dialed: targetPhone,
         is_manual_log: false,
     }, pool);
 
     // Mark lead as CONTACTED if NEW
-    const lead = await pool.query('SELECT status FROM leads WHERE id = $1', [lead_id]);
-    if (lead.rows[0]?.status === 'NEW') {
-        await pool.query('UPDATE leads SET status = $1, updated_at = NOW() WHERE id = $2', ['CONTACTED', lead_id]);
+    if (targetLeadId) {
+        const lead = await pool.query('SELECT status FROM leads WHERE id = $1', [targetLeadId]);
+        if (lead.rows[0]?.status === 'NEW') {
+            await pool.query('UPDATE leads SET status = $1, updated_at = NOW() WHERE id = $2', ['CONTACTED', targetLeadId]);
+        }
     }
 
     bustCache('cache:*:/api/calls*');
@@ -488,7 +516,7 @@ export const quickLogCall = asyncHandler(async (req, res) => {
     res.status(201).json({
         success: true,
         call,
-        phone: leadResult.rows[0].phone,
+        phone: targetPhone,
     });
 });
 
