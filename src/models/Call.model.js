@@ -182,7 +182,7 @@ class CallModel extends MasterModel {
       ORDER BY call_count DESC
       LIMIT 20
     `;
-    const agentResult = await pool.query(agentPerformanceQuery, [siteId]);
+    const agentResult = await pool.query(agentPerformanceQuery, params);
 
 
 
@@ -339,7 +339,8 @@ class CallModel extends MasterModel {
   async quickLog(data, pool) {
     const columns = [
       'site_id', 'lead_id', 'assigned_to', 'created_by',
-      'call_type', 'call_start', 'call_status', 'call_source',
+      'call_type', 'call_start', 'call_end', 'duration_seconds', 
+      'call_status', 'call_source',
       'phone_number_dialed', 'is_manual_log',
     ];
     const values = columns.map(c => data[c] !== undefined ? data[c] : null);
