@@ -27,6 +27,26 @@ export const startConversation = asyncHandler(async (req, res) => {
 });
 
 /**
+ * POST /api/chat/groups
+ * Create a group conversation
+ * Body: { name, participantIds: [] }
+ */
+export const createGroupConversation = asyncHandler(async (req, res) => {
+  const { name, participantIds } = req.body;
+
+  if (!Array.isArray(participantIds)) {
+    return res.status(400).json({ success: false, message: 'participantIds must be an array' });
+  }
+
+  try {
+    const conversation = await chatService.createGroupConversation(req.user.id, name, participantIds);
+    return res.status(201).json({ success: true, conversation });
+  } catch (err) {
+    return res.status(400).json({ success: false, message: err.message || 'Failed to create group' });
+  }
+});
+
+/**
  * GET /api/chat/conversations/:id/messages
  * Get paginated messages for a conversation
  * Query: ?limit=30&before=messageId
@@ -38,6 +58,29 @@ export const getMessages = asyncHandler(async (req, res) => {
 
   const messages = await chatService.getMessages(id, req.user.id, { limit, before });
   res.json({ success: true, messages });
+});
+
+/**
+ * DELETE /api/chat/conversations/:id
+ * Delete direct chat or group chat
+ */
+export const deleteConversation = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const result = await chatService.deleteConversation(id, req.user.id, req.user.role);
+    const io = req.app.get('io');
+    if (io) {
+      const participants = await chatService.getConversationParticipants(id).catch(() => []);
+      participants.forEach((p) => {
+        io.to(`user_${p.id}`).emit('chat:conversationDeleted', { conversation_id: id });
+      });
+    }
+
+    res.json({ success: true, result });
+  } catch (err) {
+    return res.status(403).json({ success: false, message: err.message || 'Failed to delete conversation' });
+  }
 });
 
 /**

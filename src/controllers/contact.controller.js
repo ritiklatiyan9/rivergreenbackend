@@ -55,8 +55,11 @@ export const getContacts = asyncHandler(async (req, res) => {
     if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
     const { page = 1, limit = 25, search } = req.query;
+    const role = req.user.role;
+    const scopedToUser = role === 'AGENT' || role === 'TEAM_HEAD';
+
     const result = await contactModel.findWithDetails(
-        { site_id: siteId, search },
+        { site_id: siteId, search, created_by: scopedToUser ? req.user.id : undefined },
         parseInt(page),
         parseInt(limit),
         pool
@@ -72,6 +75,14 @@ export const deleteContact = asyncHandler(async (req, res) => {
     const { id } = req.params;
     const contact = await contactModel.findById(id, pool);
     if (!contact) return res.status(404).json({ success: false, message: 'Contact not found' });
+
+    const role = req.user.role;
+    if (
+        (role === 'AGENT' || role === 'TEAM_HEAD') &&
+        contact.created_by !== req.user.id
+    ) {
+        return res.status(403).json({ success: false, message: 'You can only delete your own contacts' });
+    }
 
     await contactModel.delete(id, pool);
     bustContactCache();

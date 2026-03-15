@@ -3,6 +3,7 @@ import ColonyMap from '../models/ColonyMap.model.js';
 import MapPlot from '../models/MapPlot.model.js';
 import { uploadSingle } from '../utils/upload.js';
 import financialSettingsModel from '../models/FinancialSettings.model.js';
+import { bustCache } from '../middlewares/cache.middleware.js';
 
 // ─── Upload Map Image ───────────────────────────────────────
 
@@ -16,6 +17,7 @@ export const uploadMapImage = async (req, res) => {
         const map = await ColonyMap.update(req.params.id, { image_url: imageUrl }, pool);
         if (!map) return res.status(404).json({ success: false, message: 'Colony map not found' });
         res.json({ success: true, map, image_url: imageUrl });
+        bustCache('cache:*:/api/colony-maps*');
     } catch (err) {
         console.error('uploadMapImage error:', err);
         res.status(500).json({ success: false, message: 'Failed to upload map image' });
@@ -60,6 +62,7 @@ export const createColonyMap = async (req, res) => {
             created_by: req.user.id,
         }, pool);
         res.status(201).json({ success: true, map });
+        bustCache('cache:*:/api/colony-maps*');
     } catch (err) {
         console.error('createColonyMap error:', err);
         res.status(500).json({ success: false, message: 'Failed to create colony map' });
@@ -84,6 +87,7 @@ export const updateColonyMap = async (req, res) => {
         const map = await ColonyMap.update(req.params.id, data, pool);
         if (!map) return res.status(404).json({ success: false, message: 'Colony map not found' });
         res.json({ success: true, map });
+        bustCache('cache:*:/api/colony-maps*');
     } catch (err) {
         console.error('updateColonyMap error:', err);
         res.status(500).json({ success: false, message: 'Failed to update colony map' });
@@ -124,6 +128,7 @@ export const deleteColonyMap = async (req, res) => {
 
         await client.query('COMMIT');
         res.json({ success: true, message: 'Colony map and all associated data deleted' });
+        bustCache('cache:*:/api/colony-maps*');
     } catch (err) {
         await client.query('ROLLBACK');
         console.error('deleteColonyMap error:', err);
@@ -187,6 +192,7 @@ export const createPlot = async (req, res) => {
         }, pool);
 
         res.status(201).json({ success: true, plot });
+        bustCache('cache:*:/api/colony-maps*');
     } catch (err) {
         console.error('createPlot error:', err);
         res.status(500).json({ success: false, message: 'Failed to create plot' });
@@ -223,6 +229,7 @@ export const updatePlot = async (req, res) => {
         const plot = await MapPlot.update(plotId, data, pool);
         if (!plot) return res.status(404).json({ success: false, message: 'Plot not found' });
         res.json({ success: true, plot });
+        bustCache('cache:*:/api/colony-maps*');
     } catch (err) {
         console.error('updatePlot error:', err);
         res.status(500).json({ success: false, message: 'Failed to update plot' });
@@ -234,6 +241,7 @@ export const deletePlot = async (req, res) => {
         const plot = await MapPlot.delete(req.params.plotId, pool);
         if (!plot) return res.status(404).json({ success: false, message: 'Plot not found' });
         res.json({ success: true, message: 'Plot deleted' });
+        bustCache('cache:*:/api/colony-maps*');
     } catch (err) {
         console.error('deletePlot error:', err);
         res.status(500).json({ success: false, message: 'Failed to delete plot' });
@@ -411,6 +419,7 @@ export const updatePlotStatus = async (req, res) => {
         const plot = await MapPlot.updateStatus(req.params.plotId, status, req.user.id, pool);
         if (!plot) return res.status(404).json({ success: false, message: 'Plot not found' });
         res.json({ success: true, plot });
+        bustCache('cache:*:/api/colony-maps*');
     } catch (err) {
         console.error('updatePlotStatus error:', err);
         res.status(500).json({ success: false, message: 'Failed to update plot status' });
@@ -460,6 +469,7 @@ export const bulkSavePlots = async (req, res) => {
         }
 
         res.json({ success: true, plots: results });
+        bustCache('cache:*:/api/colony-maps*');
     } catch (err) {
         console.error('bulkSavePlots error:', err);
         res.status(500).json({ success: false, message: 'Failed to save plots' });
@@ -561,6 +571,7 @@ export const initializeLayout = async (req, res) => {
 
         await client.query('COMMIT');
         res.status(201).json({ success: true, mapId, plotCount: plotPositions.length });
+        bustCache('cache:*:/api/colony-maps*');
     } catch (err) {
         await client.query('ROLLBACK');
         console.error('initializeLayout error:', err);

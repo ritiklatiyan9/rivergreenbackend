@@ -16,6 +16,7 @@ import {
 import authMiddleware from '../middlewares/auth.middleware.js';
 import checkRole from '../middlewares/role.middleware.js';
 import upload from '../middlewares/multer.middleware.js';
+import { cacheMiddleware } from '../middlewares/cache.middleware.js';
 
 // ── PUBLIC route (no auth) ─────────────────────────────
 // Accept up to 5 screenshots
@@ -28,17 +29,17 @@ router.use(authMiddleware);
 router.post('/agent-book/:plotId', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN']), agentBookPlot);
 
 // Admin approval workflow
-router.get('/pending-approvals', checkRole(['ADMIN', 'OWNER']), getPendingApprovals);
+router.get('/pending-approvals', checkRole(['ADMIN', 'OWNER']), cacheMiddleware(60), getPendingApprovals);
 router.put('/:id/approve', checkRole(['ADMIN', 'OWNER']), approveBooking);
 router.put('/:id/reject', checkRole(['ADMIN', 'OWNER']), rejectBooking);
 
 // Stats
-router.get('/stats', checkRole(['AGENT', 'ADMIN', 'OWNER', 'TEAM_HEAD']), getBookingStats);
+router.get('/stats', checkRole(['AGENT', 'ADMIN', 'OWNER', 'TEAM_HEAD']), cacheMiddleware(120), getBookingStats);
 
 // CRUD
 router.post('/', checkRole(['ADMIN', 'OWNER', 'TEAM_HEAD', 'AGENT']), createBooking);
-router.get('/', getBookings);
-router.get('/:id', getBooking);
+router.get('/', cacheMiddleware(120), getBookings);
+router.get('/:id', cacheMiddleware(120), getBooking);
 router.put('/:id/status', checkRole(['ADMIN', 'OWNER']), updateBookingStatus);
 
 export default router;

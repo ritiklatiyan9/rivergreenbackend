@@ -2,6 +2,7 @@ import asyncHandler from '../utils/asyncHandler.js';
 import financialSettingsModel from '../models/FinancialSettings.model.js';
 import pool from '../config/db.js';
 import { uploadSingle } from '../utils/upload.js';
+import { bustCache } from '../middlewares/cache.middleware.js';
 
 // ============================================================
 // GET FINANCIAL SETTINGS (for admin's site)
@@ -52,6 +53,7 @@ export const updateFinancialSettings = asyncHandler(async (req, res) => {
 
   const settings = await financialSettingsModel.upsert(siteId, data, pool);
   res.json({ success: true, settings, message: 'Financial settings updated' });
+  bustCache('cache:*:/api/financial-settings*');
 });
 
 // ============================================================

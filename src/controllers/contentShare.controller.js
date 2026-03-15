@@ -2,6 +2,7 @@ import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
 import { uploadSingle } from '../utils/upload.js';
 import { cleanupFile } from '../middlewares/multer.middleware.js';
+import { bustCache } from '../middlewares/cache.middleware.js';
 
 // ──────────────────────────────────────────────
 // CREATE CONTENT (message and/or PDF)
@@ -29,6 +30,7 @@ export const createContent = asyncHandler(async (req, res) => {
   );
 
   res.status(201).json({ success: true, content: rows[0] });
+  bustCache(`cache:${req.user.id}:/api/content-share*`);
 });
 
 // ──────────────────────────────────────────────
@@ -55,6 +57,7 @@ export const deleteContent = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: 'Content not found' });
   }
   res.json({ success: true, message: 'Content deleted' });
+  bustCache(`cache:${req.user.id}:/api/content-share*`);
 });
 
 // ──────────────────────────────────────────────

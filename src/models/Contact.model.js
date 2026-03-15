@@ -10,6 +10,12 @@ class Contact extends MasterModel {
         const params = [filters.site_id];
         let paramIndex = 2;
 
+        if (filters.created_by) {
+            whereClauses.push(`c.created_by = $${paramIndex}`);
+            params.push(filters.created_by);
+            paramIndex++;
+        }
+
         if (filters.search) {
             whereClauses.push(`(c.name ILIKE $${paramIndex} OR c.phone ILIKE $${paramIndex})`);
             params.push(`%${filters.search}%`);

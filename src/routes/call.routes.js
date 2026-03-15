@@ -25,26 +25,26 @@ import { cacheMiddleware } from '../middlewares/cache.middleware.js';
 // All call routes require authentication
 router.use(authMiddleware);
 
-// Call outcomes (all authenticated users can fetch)
-router.get('/outcomes', getCallOutcomes);
+// Call outcomes (all authenticated users can fetch) — rarely changes
+router.get('/outcomes', cacheMiddleware(600), getCallOutcomes);
 
-// Leads Dialer — all leads with phone + call icon
-router.get('/leads-dialer', getLeadsForDialer);
+// Leads Dialer — live list of leads; short TTL
+router.get('/leads-dialer', cacheMiddleware(60), getLeadsForDialer);
 
-// Analytics (Agents, Team Heads, Admins, Owners)
-router.get('/analytics', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), getCallAnalytics);
+// Analytics
+router.get('/analytics', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getCallAnalytics);
 
 // Advanced Analytics (Admin/Owner only)
-router.get('/advanced-analytics', checkRole(['ADMIN', 'OWNER']), getAdvancedAnalytics);
+router.get('/advanced-analytics', checkRole(['ADMIN', 'OWNER']), cacheMiddleware(120), getAdvancedAnalytics);
 
 // Agent call details
-router.get('/agent/:agent_id/details', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), getAgentCallDetails);
+router.get('/agent/:agent_id/details', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getAgentCallDetails);
 
 // Follow-up compliance
-router.get('/compliance', getFollowupCompliance);
+router.get('/compliance', cacheMiddleware(120), getFollowupCompliance);
 
 // Calls by lead (timeline)
-router.get('/lead/:leadId', getCallsByLead);
+router.get('/lead/:leadId', cacheMiddleware(60), getCallsByLead);
 
 // Quick log — agent clicks call icon
 router.post('/quick-log', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN']), quickLogCall);
@@ -57,8 +57,8 @@ router.post('/bulk', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN']), bulkLogCalls);
 
 // Call CRUD
 router.post('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN']), logCall);
-router.get('/', getCalls);
-router.get('/:id', getCall);
+router.get('/', cacheMiddleware(60), getCalls);
+router.get('/:id', cacheMiddleware(120), getCall);
 router.put('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN']), updateCall);
 router.delete('/:id', checkRole(['ADMIN', 'OWNER']), deleteCall);
 

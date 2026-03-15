@@ -52,26 +52,27 @@ const excelUpload = multer({
 });
 
 import upload from '../middlewares/multer.middleware.js';
+import { cacheMiddleware } from '../middlewares/cache.middleware.js';
 
 // ── All routes require auth ──────────────────────────────────────────────────
 router.use(authMiddleware);
 
 // CRUD
 router.post('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), upload.single('photo'), createLead);
-router.get('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), getLeads);
+router.get('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getLeads);
 
 // Assignment (static routes BEFORE :id)
-router.get('/assignable-users', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), getAssignableUsers);
-router.get('/assignment-history', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), getAllAssignmentHistory);
+router.get('/assignable-users', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(300), getAssignableUsers);
+router.get('/assignment-history', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getAllAssignmentHistory);
 router.post('/bulk-assign', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), bulkAssignLeads);
 
 // Single lead routes
-router.get('/:id/full', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), getLeadFullDetails);
-router.get('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), getLead);
+router.get('/:id/full', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getLeadFullDetails);
+router.get('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getLead);
 router.put('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), upload.single('photo'), updateLead);
 router.delete('/:id', checkRole(['TEAM_HEAD', 'ADMIN', 'OWNER']), deleteLead);
 router.post('/:id/assign', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), assignLead);
-router.get('/:id/assignment-history', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), getLeadAssignmentHistory);
+router.get('/:id/assignment-history', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getLeadAssignmentHistory);
 
 // Bulk import
 router.post(
@@ -83,6 +84,7 @@ router.post(
 router.get(
     '/bulk/status/:jobId',
     checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']),
+    cacheMiddleware(15),
     getBulkJobStatus
 );
 

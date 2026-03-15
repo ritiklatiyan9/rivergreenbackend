@@ -1,6 +1,7 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import { attendanceLocationModel, attendanceRecordModel } from '../models/Attendance.model.js';
 import pool from '../config/db.js';
+import { bustCache } from '../middlewares/cache.middleware.js';
 
 // ─── Haversine formula — returns distance in meters ───
 function haversineDistance(lat1, lon1, lat2, lon2) {
@@ -50,6 +51,7 @@ export const createLocation = asyncHandler(async (req, res) => {
   if (office_start_time) payload.office_start_time = office_start_time;
   if (office_end_time) payload.office_end_time = office_end_time;
   const location = await attendanceLocationModel.create(payload, pool);
+  bustCache('cache:*:/api/attendance*');
   res.status(201).json({ success: true, location });
 });
 
@@ -78,6 +80,7 @@ export const updateLocation = asyncHandler(async (req, res) => {
   updates.updated_at = new Date();
 
   const location = await attendanceLocationModel.update(id, updates, pool);
+  bustCache('cache:*:/api/attendance*');
   res.json({ success: true, location });
 });
 
@@ -87,6 +90,7 @@ export const deleteLocation = asyncHandler(async (req, res) => {
   const existing = await attendanceLocationModel.findById(id, pool);
   if (!existing) return res.status(404).json({ success: false, message: 'Location not found' });
   await attendanceLocationModel.delete(id, pool);
+  bustCache('cache:*:/api/attendance*');
   res.json({ success: true, message: 'Location deleted' });
 });
 
@@ -156,6 +160,7 @@ export const checkIn = asyncHandler(async (req, res) => {
     record,
     distance: Math.round(distance),
   });
+  bustCache('cache:*:/api/attendance*');
 });
 
 /** POST /api/attendance/check-out — mark attendance check-out */
@@ -212,6 +217,7 @@ export const checkOut = asyncHandler(async (req, res) => {
     record: updated,
     distance: Math.round(distance),
   });
+  bustCache('cache:*:/api/attendance*');
 });
 
 /** GET /api/attendance/my-today — agent's today status */

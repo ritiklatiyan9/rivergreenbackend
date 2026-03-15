@@ -5,6 +5,8 @@
 CREATE TABLE IF NOT EXISTS chat_conversations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   created_by UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  is_group BOOLEAN NOT NULL DEFAULT FALSE,
+  group_name VARCHAR(120),
   created_at TIMESTAMP DEFAULT NOW()
 );
 

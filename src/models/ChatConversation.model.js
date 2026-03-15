@@ -12,7 +12,8 @@ class ChatConversationModel extends MasterModel {
     const query = `
       SELECT c.id, c.created_by, c.created_at
       FROM chat_conversations c
-      WHERE (
+      WHERE COALESCE(c.is_group, false) = false
+      AND (
         SELECT COUNT(*) FROM chat_participants cp WHERE cp.conversation_id = c.id
       ) = 2
       AND EXISTS (
@@ -30,14 +31,15 @@ class ChatConversationModel extends MasterModel {
   /**
    * Create a new conversation with participants
    */
-  async createWithParticipants(createdBy, participantIds, pool) {
+  async createWithParticipants(createdBy, participantIds, pool, options = {}) {
+    const { isGroup = false, groupName = null } = options;
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
 
       const convResult = await client.query(
-        'INSERT INTO chat_conversations (created_by) VALUES ($1) RETURNING *',
-        [createdBy]
+        'INSERT INTO chat_conversations (created_by, is_group, group_name) VALUES ($1, $2, $3) RETURNING *',
+        [createdBy, isGroup, groupName]
       );
       const conversation = convResult.rows[0];
 
@@ -65,7 +67,15 @@ class ChatConversationModel extends MasterModel {
     const query = `
       SELECT
         c.id,
+        c.created_by,
         c.created_at,
+        COALESCE(c.is_group, false) AS is_group,
+        c.group_name,
+        (
+          SELECT COUNT(*)
+          FROM chat_participants cp3
+          WHERE cp3.conversation_id = c.id
+        ) AS participant_count,
         (
           SELECT json_build_object(
             'id', m.id,
@@ -97,7 +107,7 @@ class ChatConversationModel extends MasterModel {
       JOIN chat_participants cp ON cp.conversation_id = c.id AND cp.user_id = $1
       ORDER BY (
         SELECT MAX(m2.created_at) FROM chat_messages m2 WHERE m2.conversation_id = c.id
-      ) DESC NULLS LAST
+      ) DESC NULLS LAST, c.created_at DESC
     `;
     const result = await pool.query(query, [userId]);
     return result.rows;

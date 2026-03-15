@@ -24,6 +24,29 @@ class ChatService {
   }
 
   /**
+   * Create a group conversation
+   */
+  async createGroupConversation(currentUserId, groupName, participantIds = []) {
+    const normalized = Array.from(new Set(
+      (participantIds || []).filter(Boolean).map((id) => String(id).trim())
+    ));
+
+    const withoutSelf = normalized.filter((id) => String(id) !== String(currentUserId));
+    if (withoutSelf.length < 1) {
+      throw new Error('Please select at least one user for group chat');
+    }
+
+    const participants = [currentUserId, ...withoutSelf];
+
+    return ChatConversation.createWithParticipants(
+      currentUserId,
+      participants,
+      pool,
+      { isGroup: true, groupName: (groupName || '').trim() || 'New Group' }
+    );
+  }
+
+  /**
    * Get all conversations for a user
    */
   async getUserConversations(userId) {
@@ -154,6 +177,35 @@ class ChatService {
     `;
     const result = await pool.query(query, [conversationId]);
     return result.rows;
+  }
+
+  /**
+   * Delete a conversation.
+   * - Direct chat: any participant can delete the full chat thread.
+   * - Group chat: only creator or ADMIN can delete the group.
+   */
+  async deleteConversation(conversationId, currentUserId, currentUserRole) {
+    const convRes = await pool.query(
+      'SELECT id, created_by, COALESCE(is_group, false) AS is_group, group_name FROM chat_conversations WHERE id = $1',
+      [conversationId]
+    );
+    const conversation = convRes.rows[0];
+    if (!conversation) throw new Error('Conversation not found');
+
+    const isParticipant = await ChatConversation.isParticipant(conversationId, currentUserId, pool);
+    if (!isParticipant) throw new Error('Not a participant of this conversation');
+
+    if (conversation.is_group) {
+      const canDeleteGroup = String(conversation.created_by) === String(currentUserId) || currentUserRole === 'ADMIN';
+      if (!canDeleteGroup) {
+        throw new Error('Only group creator or admin can delete this group');
+      }
+      await pool.query('DELETE FROM chat_conversations WHERE id = $1', [conversationId]);
+      return { deleted: true, is_group: true, group_name: conversation.group_name || 'Group Chat' };
+    }
+
+    await pool.query('DELETE FROM chat_conversations WHERE id = $1', [conversationId]);
+    return { deleted: true, is_group: false };
   }
 }
 

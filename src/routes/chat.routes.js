@@ -5,6 +5,8 @@ import chatUpload from '../middlewares/chatUpload.middleware.js';
 import {
   getConversations,
   startConversation,
+  createGroupConversation,
+  deleteConversation,
   getMessages,
   sendMessage,
   sendFileMessage,
@@ -30,6 +32,8 @@ router.get('/my-permissions', getMyPermissions);
 // Conversations
 router.get('/conversations', getConversations);
 router.post('/conversations', startConversation);
+router.post('/groups', createGroupConversation);
+router.delete('/conversations/:id', deleteConversation);
 
 // Messages
 router.get('/conversations/:id/messages', getMessages);

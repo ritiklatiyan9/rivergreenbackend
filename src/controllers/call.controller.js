@@ -116,6 +116,8 @@ export const logCall = asyncHandler(async (req, res) => {
 
     bustCache('cache:*:/api/calls*');
     bustCache('cache:*:/api/followups*');
+    bustCache('cache:*:/api/dashboard*');
+    bustCache('cache:*:/api/leads*');
 
     res.status(201).json({ success: true, call, followup });
 });
