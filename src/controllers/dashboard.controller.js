@@ -26,7 +26,7 @@ const getScopeFilters = (user) => {
 export const getDashboardStats = asyncHandler(async (req, res) => {
   const user = await userModel.findById(req.user.id, pool);
   if (!user || !user.site_id) {
-    return res.status(404).json({ success: false, message: 'No site assigned' });
+    return res.status(404).json({ success: false, message: 'No yu site assigned' });
   }
 
   const siteId = user.site_id;
