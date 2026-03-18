@@ -89,11 +89,18 @@ class LeadModel extends MasterModel {
             SELECT l.*, 
                    u.name as assigned_to_name,
                    c.name as created_by_name,
-                   o.name as owner_name
+                   o.name as owner_name,
+                   COALESCE(cc.total_calls, 0)::int AS calls_dialed
             FROM ${this.tableName} l
             LEFT JOIN users u ON l.assigned_to = u.id
             LEFT JOIN users c ON l.created_by = c.id
             LEFT JOIN users o ON l.owner_id = o.id
+            LEFT JOIN LATERAL (
+                SELECT COUNT(*)::int AS total_calls
+                FROM calls cl
+                WHERE cl.site_id = l.site_id
+                  AND cl.lead_id = l.id
+            ) cc ON TRUE
             ${whereString}
             ORDER BY l.created_at DESC
             ${paginationClause}

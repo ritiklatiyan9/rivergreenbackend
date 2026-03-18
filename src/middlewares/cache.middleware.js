@@ -57,6 +57,7 @@ export const memCache = new MemCache(3000);
 export const cacheMiddleware = (ttl = 300) => {
     // L1 TTL is capped at 120 s so L2 Redis remains authoritative
     const l1Ttl = Math.min(ttl, 120);
+    const isRedisAvailable = () => redisClient?.isOpen && redisClient?.isReady;
 
     return async (req, res, next) => {
         if (req.method !== 'GET') return next();
@@ -74,24 +75,28 @@ export const cacheMiddleware = (ttl = 300) => {
         }
 
         // Tier-2: Redis hit
-        try {
-            const cached = await redisClient.get(cacheKey);
-            if (cached) {
-                const parsed = JSON.parse(cached);
-                memCache.set(cacheKey, parsed, l1Ttl);  // promote to L1
-                res.setHeader('X-Cache', 'L2');
-                return res.json(parsed);
+        if (isRedisAvailable()) {
+            try {
+                const cached = await redisClient.get(cacheKey);
+                if (cached) {
+                    const parsed = JSON.parse(cached);
+                    memCache.set(cacheKey, parsed, l1Ttl);  // promote to L1
+                    res.setHeader('X-Cache', 'L2');
+                    return res.json(parsed);
+                }
+            } catch (err) {
+                console.error('[Cache] Redis read error:', err.message);
             }
-        } catch (err) {
-            console.error('[Cache] Redis read error:', err.message);
         }
 
         // Cache miss → intercept res.json to populate both tiers
         const originalJson = res.json.bind(res);
         res.json = (body) => {
-            redisClient
-                .setEx(cacheKey, ttl, JSON.stringify(body))
-                .catch((err) => console.error('[Cache] Redis write error:', err.message));
+            if (isRedisAvailable()) {
+                redisClient
+                    .setEx(cacheKey, ttl, JSON.stringify(body))
+                    .catch((err) => console.error('[Cache] Redis write error:', err.message));
+            }
             memCache.set(cacheKey, body, l1Ttl);
             res.setHeader('X-Cache', 'MISS');
             return originalJson(body);
@@ -112,6 +117,7 @@ export const cacheMiddleware = (ttl = 300) => {
 export const bustCache = async (pattern) => {
     // Always clear L1 synchronously
     memCache.deleteByPattern(pattern);
+    if (!(redisClient?.isOpen && redisClient?.isReady)) return;
     // Clear L2 Redis via SCAN (cursor-safe, no KEYS block)
     try {
         let cursor = 0;

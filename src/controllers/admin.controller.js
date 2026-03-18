@@ -1,5 +1,5 @@
 import asyncHandler from '../utils/asyncHandler.js';
-import { hashPassword } from '../config/jwt.js';
+import { hashPassword, comparePassword } from '../config/jwt.js';
 import userModel from '../models/User.model.js';
 import siteModel from '../models/Site.model.js';
 import pool from '../config/db.js';
@@ -37,7 +37,20 @@ export const createSite = asyncHandler(async (req, res) => {
 
 // List all sites for owner
 export const listSites = asyncHandler(async (req, res) => {
-  const sites = await siteModel.findWithAdminCount(req.user.id, pool);
+  let sites;
+  if (req.user.role === 'OWNER') {
+    sites = await siteModel.findWithAdminCount(req.user.id, pool);
+  } else {
+    const query = `
+      SELECT s.*,
+        (SELECT COUNT(*) FROM users u WHERE u.site_id = s.id AND u.role = 'ADMIN') as admin_count,
+        (SELECT COUNT(*) FROM users u WHERE u.site_id = s.id) as total_users
+      FROM sites s
+      ORDER BY s.created_at DESC
+    `;
+    const result = await pool.query(query);
+    sites = result.rows;
+  }
   res.json({ success: true, sites });
 });
 
@@ -47,8 +60,11 @@ export const updateSite = asyncHandler(async (req, res) => {
   const { name, address, city, state, description, is_active } = req.body;
 
   const site = await siteModel.findById(id, pool);
-  if (!site || site.created_by !== req.user.id) {
+  if (!site) {
     return res.status(404).json({ success: false, message: 'Site not found' });
+  }
+  if (req.user.role === 'OWNER' && site.created_by && site.created_by !== req.user.id) {
+    return res.status(403).json({ success: false, message: 'You do not have access to this site' });
   }
 
   const updateData = {};
@@ -73,8 +89,20 @@ export const deleteSite = asyncHandler(async (req, res) => {
   const { id } = req.params;
 
   const site = await siteModel.findById(id, pool);
-  if (!site || site.created_by !== req.user.id) {
+  if (!site) {
     return res.status(404).json({ success: false, message: 'Site not found' });
+  }
+  if (req.user.role === 'OWNER' && site.created_by && site.created_by !== req.user.id) {
+    return res.status(403).json({ success: false, message: 'You do not have access to this site' });
+  }
+
+  const usersResult = await pool.query('SELECT COUNT(*)::int AS count FROM users WHERE site_id = $1', [id]);
+  const usersCount = usersResult.rows[0]?.count || 0;
+  if (usersCount > 0) {
+    return res.status(400).json({
+      success: false,
+      message: `Cannot delete site with ${usersCount} assigned users. Reassign users first.`,
+    });
   }
 
   await siteModel.delete(id, pool);
@@ -95,14 +123,17 @@ export const getSiteCount = asyncHandler(async (req, res) => {
 // Create Admin and assign to a site
 export const createAdmin = asyncHandler(async (req, res) => {
   const { name, email, password, phone, site_id } = req.body;
-  if (!name || !email || !password || !site_id) {
+  const targetSiteId = site_id || req.user.site_id;
+  if (!name || !email || !password || !targetSiteId) {
     return res.status(400).json({ success: false, message: 'Name, email, password and site_id are required' });
   }
 
-  // Verify site belongs to this owner
-  const site = await siteModel.findById(site_id, pool);
-  if (!site || site.created_by !== req.user.id) {
+  const site = await siteModel.findById(targetSiteId, pool);
+  if (!site) {
     return res.status(404).json({ success: false, message: 'Site not found' });
+  }
+  if (req.user.role === 'OWNER' && site.created_by && site.created_by !== req.user.id) {
+    return res.status(403).json({ success: false, message: 'You do not have access to this site' });
   }
 
   const existing = await userModel.findByEmail(email, pool);
@@ -117,7 +148,7 @@ export const createAdmin = asyncHandler(async (req, res) => {
     phone: phone || null,
     password: hashedPassword,
     role: 'ADMIN',
-    site_id,
+    site_id: targetSiteId,
     sponsor_code: sponsorCode,
     sponsor_id: null,
     parent_id: null,
@@ -131,7 +162,10 @@ export const createAdmin = asyncHandler(async (req, res) => {
 
 // List all Admins (Owner only)
 export const listAdmins = asyncHandler(async (req, res) => {
-  const admins = await userModel.findAllByRole('ADMIN', pool);
+  let admins = await userModel.findAllByRole('ADMIN', pool);
+  if (req.user.role === 'ADMIN') {
+    admins = admins.filter((admin) => String(admin.site_id || '') === String(req.user.site_id || ''));
+  }
 
   // Enrich with site name
   const enriched = [];
@@ -157,6 +191,10 @@ export const updateAdmin = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: 'Admin not found' });
   }
 
+  if (req.user.role === 'ADMIN' && String(admin.site_id || '') !== String(req.user.site_id || '')) {
+    return res.status(403).json({ success: false, message: 'You do not have access to this admin' });
+  }
+
   let updateData = {};
   if (name) updateData.name = name;
   if (phone !== undefined) updateData.phone = phone;
@@ -171,8 +209,14 @@ export const updateAdmin = asyncHandler(async (req, res) => {
   if (password) updateData.password = await hashPassword(password);
   if (site_id) {
     const site = await siteModel.findById(site_id, pool);
-    if (!site || site.created_by !== req.user.id) {
+    if (!site) {
       return res.status(404).json({ success: false, message: 'Site not found' });
+    }
+    if (req.user.role === 'OWNER' && site.created_by && site.created_by !== req.user.id) {
+      return res.status(403).json({ success: false, message: 'You do not have access to this site' });
+    }
+    if (req.user.role === 'ADMIN' && String(site.id) !== String(req.user.site_id || '')) {
+      return res.status(403).json({ success: false, message: 'You can only assign your current site' });
     }
     updateData.site_id = site_id;
   }
@@ -193,6 +237,10 @@ export const deleteAdmin = asyncHandler(async (req, res) => {
   const admin = await userModel.findById(id, pool);
   if (!admin || admin.role !== 'ADMIN') {
     return res.status(404).json({ success: false, message: 'Admin not found' });
+  }
+
+  if (req.user.role === 'ADMIN' && String(admin.site_id || '') !== String(req.user.site_id || '')) {
+    return res.status(403).json({ success: false, message: 'You do not have access to this admin' });
   }
 
   await userModel.delete(id, pool);
@@ -219,5 +267,177 @@ export const getOwnerStats = asyncHandler(async (req, res) => {
       total_admins: adminCount,
       sites,
     },
+  });
+});
+
+// ============================================================
+// USER ACCESS MANAGEMENT (Account Access & Site Assignments)
+// ============================================================
+
+// Get all users for access management (exclude owner)
+export const getAllUsersForAccess = asyncHandler(async (req, res) => {
+  const query = `
+    SELECT 
+      u.id, u.name, u.email, u.role, u.site_id, u.is_active, u.created_at,
+      s.name as site_name,
+      (SELECT COUNT(*)::int FROM leads WHERE assigned_to = u.id) as lead_count,
+      (SELECT COUNT(*)::int FROM calls WHERE assigned_to = u.id) as call_count
+    FROM users u
+    LEFT JOIN sites s ON u.site_id = s.id
+    WHERE u.role != 'OWNER'
+    ORDER BY u.created_at DESC
+  `;
+  const result = await pool.query(query);
+  res.json({ success: true, users: result.rows });
+});
+
+// Update user account access (enable/disable)
+export const updateUserAccountAccess = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { is_active } = req.body;
+
+  if (is_active === undefined) {
+    return res.status(400).json({ success: false, message: 'is_active is required' });
+  }
+
+  const user = await userModel.findById(id, pool);
+  if (!user) {
+    return res.status(404).json({ success: false, message: 'User not found' });
+  }
+
+  // Prevent disabling owner accounts
+  if (user.role === 'OWNER') {
+    return res.status(403).json({ success: false, message: 'Cannot disable owner account' });
+  }
+
+  // Admin can only manage users in their site
+  if (req.user.role === 'ADMIN' && String(user.site_id || '') !== String(req.user.site_id || '')) {
+    return res.status(403).json({ success: false, message: 'You do not have access to this user' });
+  }
+
+  const nextIsActive = typeof is_active === 'boolean'
+    ? is_active
+    : String(is_active).toLowerCase() === 'true';
+
+  const updatePayload = { is_active: nextIsActive };
+  if (!nextIsActive) {
+    updatePayload.refresh_token = null;
+    updatePayload.token_version = (user.token_version || 0) + 1;
+  }
+
+  await userModel.update(id, updatePayload, pool);
+  await bustCache('cache:*:/api/admin/*');
+  
+  res.json({
+    success: true,
+    message: `User account ${nextIsActive ? 'enabled' : 'disabled'} successfully`,
+    user: sanitizeUser(await userModel.findById(id, pool)),
+  });
+});
+
+// Update user site assignments and access
+export const updateUserSiteAccess = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { site_id } = req.body;
+
+  const user = await userModel.findById(id, pool);
+  if (!user) {
+    return res.status(404).json({ success: false, message: 'User not found' });
+  }
+
+  // Prevent changing owner's site
+  if (user.role === 'OWNER') {
+    return res.status(403).json({ success: false, message: 'Cannot change owner site assignment' });
+  }
+
+  // Validate site exists if provided
+  if (site_id) {
+    const site = await siteModel.findById(site_id, pool);
+    if (!site) {
+      return res.status(404).json({ success: false, message: 'Site not found' });
+    }
+
+    // Owner can assign any site; Admin can only assign their own site
+    if (req.user.role === 'ADMIN' && String(site.id) !== String(req.user.site_id || '')) {
+      return res.status(403).json({ success: false, message: 'You can only assign your current site' });
+    }
+  }
+
+  await userModel.update(id, { site_id: site_id || null }, pool);
+  await bustCache('cache:*:/api/admin/*');
+
+  const updated = await userModel.findById(id, pool);
+  res.json({
+    success: true,
+    message: 'User site assignment updated',
+    user: sanitizeUser(updated),
+  });
+});
+
+// Reset user password (admin sets temporary password)
+export const resetUserPassword = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { temporary_password } = req.body;
+
+  if (!temporary_password || temporary_password.length < 6) {
+    return res.status(400).json({ success: false, message: 'Temporary password must be at least 6 characters' });
+  }
+
+  const user = await userModel.findById(id, pool);
+  if (!user) {
+    return res.status(404).json({ success: false, message: 'User not found' });
+  }
+
+  // Prevent resetting owner password
+  if (user.role === 'OWNER') {
+    return res.status(403).json({ success: false, message: 'Cannot reset owner password' });
+  }
+
+  // Admin can only reset passwords for users in their site
+  if (req.user.role === 'ADMIN' && String(user.site_id || '') !== String(req.user.site_id || '')) {
+    return res.status(403).json({ success: false, message: 'You do not have access to this user' });
+  }
+
+  const hashedPassword = await hashPassword(temporary_password);
+  await userModel.update(id, { password: hashedPassword }, pool);
+  await bustCache('cache:*:/api/admin/*');
+
+  res.json({
+    success: true,
+    message: 'User password reset successfully',
+    user: sanitizeUser(await userModel.findById(id, pool)),
+  });
+});
+
+// Change own password (authenticated user)
+export const changeOwnPassword = asyncHandler(async (req, res) => {
+  const { current_password, new_password } = req.body;
+
+  if (!current_password || !new_password) {
+    return res.status(400).json({ success: false, message: 'Current and new password are required' });
+  }
+
+  if (new_password.length < 6) {
+    return res.status(400).json({ success: false, message: 'New password must be at least 6 characters' });
+  }
+
+  const user = await userModel.findById(req.user.id, pool);
+  if (!user) {
+    return res.status(404).json({ success: false, message: 'User not found' });
+  }
+
+  // Verify current password
+  const valid = await comparePassword(current_password, user.password);
+  if (!valid) {
+    return res.status(401).json({ success: false, message: 'Current password is incorrect' });
+  }
+
+  const hashedPassword = await hashPassword(new_password);
+  await userModel.update(req.user.id, { password: hashedPassword }, pool);
+  await bustCache('cache:*:/api/admin/*');
+
+  res.json({
+    success: true,
+    message: 'Password changed successfully',
   });
 });

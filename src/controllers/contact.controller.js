@@ -17,6 +17,28 @@ const bustContactCache = () => {
     bustCache('cache:*:/api/contacts*');
 };
 
+const ensureShiftToCallTable = async (db) => {
+    await db.query(`
+        CREATE TABLE IF NOT EXISTS shift_to_call_queue (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            site_id UUID NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+            contact_id UUID NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+            lead_id UUID NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+            queued_by UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            status VARCHAR(20) NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'CALLED', 'REMOVED')),
+            queued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            called_at TIMESTAMPTZ,
+            last_call_id UUID REFERENCES calls(id) ON DELETE SET NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            CONSTRAINT uq_shift_to_call UNIQUE (site_id, contact_id, queued_by)
+        );
+    `);
+
+    await db.query('CREATE INDEX IF NOT EXISTS idx_shift_to_call_site_status ON shift_to_call_queue(site_id, status, queued_by)');
+    await db.query('CREATE INDEX IF NOT EXISTS idx_shift_to_call_contact ON shift_to_call_queue(contact_id)');
+};
+
 // ============================================================
 // CREATE CONTACT — single manual add
 // ============================================================
@@ -48,7 +70,7 @@ export const createContact = asyncHandler(async (req, res) => {
 });
 
 // ============================================================
-// GET CONTACTS — paginated list (non-converted only)
+// GET CONTACTS — paginated list (includes converted and non-converted)
 // ============================================================
 export const getContacts = asyncHandler(async (req, res) => {
     const siteId = await getSiteId(req.user.id);
@@ -101,7 +123,7 @@ export const convertContactToLead = asyncHandler(async (req, res) => {
     const contact = await contactModel.findById(id, pool);
     if (!contact) return res.status(404).json({ success: false, message: 'Contact not found' });
     if (contact.is_converted) {
-        return res.status(400).json({ success: false, message: 'Contact already converted', lead_id: contact.converted_lead_id });
+        return res.json({ success: true, lead_id: contact.converted_lead_id, message: 'Contact already converted to lead' });
     }
 
     // Check if a lead with this phone already exists
@@ -135,6 +157,147 @@ export const convertContactToLead = asyncHandler(async (req, res) => {
     bustCache('cache:*:/api/leads*');
 
     res.json({ success: true, lead_id: leadId, message: 'Contact converted to lead' });
+});
+
+// ============================================================
+// SHIFT CONTACTS TO CALL QUEUE
+// ============================================================
+export const shiftContactsToCall = asyncHandler(async (req, res) => {
+    const siteId = await getSiteId(req.user.id);
+    if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
+
+    const { contact_ids = [], select_all = false, search = '' } = req.body || {};
+
+    if (!select_all && (!Array.isArray(contact_ids) || contact_ids.length === 0)) {
+        return res.status(400).json({ success: false, message: 'Select at least one contact' });
+    }
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        await ensureShiftToCallTable(client);
+
+        const role = req.user.role;
+        const scopedToUser = role === 'AGENT' || role === 'TEAM_HEAD';
+
+        const baseParams = [siteId];
+        let where = 'WHERE c.site_id = $1';
+        let idx = 2;
+
+        if (scopedToUser) {
+            where += ` AND c.created_by = $${idx++}`;
+            baseParams.push(req.user.id);
+        }
+
+        if (select_all) {
+            if (search && String(search).trim()) {
+                where += ` AND (c.name ILIKE $${idx} OR c.phone ILIKE $${idx})`;
+                baseParams.push(`%${String(search).trim()}%`);
+                idx++;
+            }
+        } else {
+            where += ` AND c.id = ANY($${idx}::uuid[])`;
+            baseParams.push(contact_ids);
+            idx++;
+        }
+
+        const contactsResult = await client.query(
+            `SELECT c.id, c.name, c.phone, c.is_converted, c.converted_lead_id
+             FROM contacts c
+             ${where}
+             ORDER BY c.created_at DESC`,
+            baseParams
+        );
+
+        if (contactsResult.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ success: false, message: 'No contacts found for shift' });
+        }
+
+        // Keep queue scoped to the latest shift action: any previously pending
+        // entries not in current selection are marked removed.
+        const selectedIds = contactsResult.rows.map((c) => c.id);
+        await client.query(
+            `UPDATE shift_to_call_queue
+             SET status = 'REMOVED', updated_at = NOW()
+             WHERE site_id = $1
+               AND queued_by = $2
+               AND status = 'PENDING'
+               AND NOT (contact_id = ANY($3::uuid[]))`,
+            [siteId, req.user.id, selectedIds]
+        );
+
+        let shiftedCount = 0;
+        const shiftedItems = [];
+
+        for (const contact of contactsResult.rows) {
+            let leadId = contact.converted_lead_id;
+
+            if (!leadId) {
+                const existingLead = await client.query(
+                    'SELECT id FROM leads WHERE site_id = $1 AND phone = $2 LIMIT 1',
+                    [siteId, contact.phone]
+                );
+
+                if (existingLead.rows[0]) {
+                    leadId = existingLead.rows[0].id;
+                } else {
+                    const lead = await leadModel.create({
+                        site_id: siteId,
+                        name: contact.name,
+                        phone: contact.phone,
+                        status: 'NEW',
+                        owner_id: req.user.id,
+                        created_by: req.user.id,
+                        assigned_to: req.user.id,
+                    }, client);
+                    leadId = lead.id;
+                }
+            }
+
+            const queueResult = await client.query(
+                `INSERT INTO shift_to_call_queue (site_id, contact_id, lead_id, queued_by, status, queued_at, called_at, last_call_id, updated_at)
+                 VALUES ($1, $2, $3, $4, 'PENDING', NOW(), NULL, NULL, NOW())
+                 ON CONFLICT (site_id, contact_id, queued_by)
+                 DO UPDATE SET
+                    lead_id = EXCLUDED.lead_id,
+                    status = 'PENDING',
+                    queued_at = NOW(),
+                    called_at = NULL,
+                    last_call_id = NULL,
+                    updated_at = NOW()
+                 RETURNING id`,
+                [siteId, contact.id, leadId, req.user.id]
+            );
+
+            shiftedCount++;
+            shiftedItems.push({
+                queue_id: queueResult.rows[0].id,
+                contact_id: contact.id,
+                lead_id: leadId,
+                name: contact.name,
+                phone: contact.phone,
+            });
+        }
+
+        await client.query('COMMIT');
+
+        bustContactCache();
+        bustCache('cache:*:/api/leads*');
+        bustCache('cache:*:/api/calls*');
+
+        res.json({
+            success: true,
+            shifted_count: shiftedCount,
+            items: shiftedItems,
+            message: `${shiftedCount} contact${shiftedCount > 1 ? 's' : ''} shifted to call queue`,
+        });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+    } finally {
+        client.release();
+    }
 });
 
 // ============================================================

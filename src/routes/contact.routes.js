@@ -8,6 +8,7 @@ import {
     convertContactToLead,
     bulkUploadContacts,
     getContactJobStatus,
+    shiftContactsToCall,
 } from '../controllers/contact.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import checkRole from '../middlewares/role.middleware.js';
@@ -49,6 +50,7 @@ router.post('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), createCont
 router.get('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getContacts);
 router.delete('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), deleteContact);
 router.post('/:id/convert', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), convertContactToLead);
+router.post('/shift-to-call', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), shiftContactsToCall);
 router.post('/bulk/upload', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), excelUpload.single('file'), bulkUploadContacts);
 router.get('/bulk/status/:jobId', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(15), getContactJobStatus);
 

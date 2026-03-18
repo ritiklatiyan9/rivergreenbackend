@@ -1,6 +1,7 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import { signAccessToken, signRefreshToken, verifyToken, hashPassword, comparePassword, hashRefreshToken } from '../config/jwt.js';
 import userModel from '../models/User.model.js';
+import siteModel from '../models/Site.model.js';
 import pool from '../config/db.js';
 import { uploadSingle } from '../utils/upload.js';
 
@@ -28,6 +29,20 @@ const sanitizeUser = (user) => {
 const readRefreshToken = (req) => {
   const headerToken = req.get('x-refresh-token');
   return req.cookies?.refreshToken || req.body?.refreshToken || headerToken || null;
+};
+
+const getAccessibleSitesForUser = async (user) => {
+  if (!user) return [];
+
+  if (user.role === 'OWNER' || user.role === 'ADMIN') {
+    const sites = await siteModel.findAll(pool);
+    return sites.filter((site) => site.is_active !== false);
+  }
+
+  if (!user.site_id) return [];
+  const site = await siteModel.findById(user.site_id, pool);
+  if (!site || site.is_active === false) return [];
+  return [site];
 };
 
 // Register owner via Postman
@@ -58,6 +73,10 @@ export const login = asyncHandler(async (req, res) => {
   const user = await userModel.findByEmail(email, pool);
   if (!user) {
     return res.status(401).json({ success: false, message: 'Invalid credentials' });
+  }
+
+  if (!user.is_active) {
+    return res.status(403).json({ success: false, message: 'Account is disabled. Contact administrator.' });
   }
 
   // Primary check: bcrypt compare (normal case)
@@ -141,6 +160,12 @@ export const refresh = asyncHandler(async (req, res) => {
       throw new Error('version_mismatch');
     }
 
+    if (!user.is_active) {
+      await userModel.update(user.id, { token_version: (user.token_version || 0) + 1, refresh_token: null }, pool);
+      res.clearCookie('refreshToken', CLEAR_COOKIE_OPTIONS);
+      throw new Error('inactive_user');
+    }
+
     const valid = await comparePassword(refreshToken, user.refresh_token);
     if (!valid) {
       await userModel.update(user.id, { token_version: (user.token_version || 0) + 1, refresh_token: null }, pool);
@@ -191,6 +216,59 @@ export const getMe = asyncHandler(async (req, res) => {
   const user = await userModel.findByIdSafe(req.user.id, pool);
   if (!user) return res.status(404).json({ success: false, message: 'User not found' });
   res.json({ success: true, user });
+});
+
+// Get all sites accessible to current user and resolve active site
+export const getAccessibleSites = asyncHandler(async (req, res) => {
+  const user = await userModel.findByIdSafe(req.user.id, pool);
+  if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+  const sites = await getAccessibleSitesForUser(user);
+  const activeSite = user.site_id
+    ? sites.find((site) => String(site.id) === String(user.site_id)) || null
+    : sites[0] || null;
+
+  res.json({
+    success: true,
+    sites,
+    active_site_id: activeSite?.id || null,
+    active_site: activeSite || null,
+  });
+});
+
+// Set active site for current session user (persists on users.site_id)
+export const setActiveSite = asyncHandler(async (req, res) => {
+  const { site_id } = req.body;
+  if (!site_id) {
+    return res.status(400).json({ success: false, message: 'site_id is required' });
+  }
+
+  const user = await userModel.findById(req.user.id, pool);
+  if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+  const accessibleSites = await getAccessibleSitesForUser(user);
+  const nextSite = accessibleSites.find((site) => String(site.id) === String(site_id));
+  if (!nextSite) {
+    return res.status(403).json({ success: false, message: 'You do not have access to this site' });
+  }
+
+  const updatedUser = await userModel.update(user.id, { site_id: nextSite.id }, pool);
+
+  const accessToken = signAccessToken({
+    id: updatedUser.id,
+    email: updatedUser.email,
+    role: updatedUser.role,
+    site_id: nextSite.id,
+    version: updatedUser.token_version,
+  });
+
+  res.json({
+    success: true,
+    message: 'Active site updated',
+    accessToken,
+    site_id: nextSite.id,
+    site: nextSite,
+  });
 });
 
 // Update own profile

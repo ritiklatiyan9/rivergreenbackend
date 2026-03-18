@@ -28,6 +28,28 @@ const getScopeFilters = (user, dbUser) => {
     return filters;
 };
 
+const ensureShiftToCallTable = async (db) => {
+    await db.query(`
+        CREATE TABLE IF NOT EXISTS shift_to_call_queue (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            site_id UUID NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+            contact_id UUID NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+            lead_id UUID NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+            queued_by UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            status VARCHAR(20) NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'CALLED', 'REMOVED')),
+            queued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            called_at TIMESTAMPTZ,
+            last_call_id UUID REFERENCES calls(id) ON DELETE SET NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            CONSTRAINT uq_shift_to_call UNIQUE (site_id, contact_id, queued_by)
+        );
+    `);
+
+    await db.query('CREATE INDEX IF NOT EXISTS idx_shift_to_call_site_status ON shift_to_call_queue(site_id, status, queued_by)');
+    await db.query('CREATE INDEX IF NOT EXISTS idx_shift_to_call_contact ON shift_to_call_queue(contact_id)');
+};
+
 // ============================================================
 // LOG A CALL
 // ============================================================
@@ -132,13 +154,14 @@ export const getCalls = asyncHandler(async (req, res) => {
     }
 
     const scope = getScopeFilters(req.user, dbUser);
-    const { page, limit, lead_id, outcome_id, lead_category, date_from, date_to } = req.query;
+    const { page, limit, lead_id, outcome_id, lead_category, call_type, date_from, date_to } = req.query;
 
     const result = await callModel.findWithDetails({
         ...scope,
         leadId: lead_id,
         outcomeId: outcome_id,
         leadCategory: lead_category,
+        callType: call_type,
         dateFrom: date_from,
         dateTo: date_to,
         page: parseInt(page) || 1,
@@ -446,10 +469,74 @@ export const getLeadsForDialer = asyncHandler(async (req, res) => {
 });
 
 // ============================================================
+// SHIFT-TO-CALL QUEUE (pending contacts selected from contacts module)
+// ============================================================
+export const getShiftToCallQueue = asyncHandler(async (req, res) => {
+    const dbUser = await userModel.findById(req.user.id, pool);
+    if (!dbUser || !dbUser.site_id) {
+        return res.status(404).json({ success: false, message: 'No site assigned' });
+    }
+
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || 25;
+    const offset = (page - 1) * limit;
+
+    await ensureShiftToCallTable(pool);
+
+    const countResult = await pool.query(
+        `SELECT COUNT(*)::int AS total
+         FROM shift_to_call_queue q
+         WHERE q.site_id = $1 AND q.queued_by = $2 AND q.status = 'PENDING'`,
+        [dbUser.site_id, req.user.id]
+    );
+
+    const total = countResult.rows[0]?.total || 0;
+
+    const result = await pool.query(
+        `SELECT q.id AS queue_id,
+                q.contact_id,
+                q.lead_id,
+                q.queued_at,
+                c.name AS contact_name,
+                c.phone,
+                l.status AS lead_status,
+                l.lead_category,
+                COALESCE(cc.total_calls, 0)::int AS total_calls
+         FROM shift_to_call_queue q
+         JOIN contacts c ON c.id = q.contact_id
+         LEFT JOIN leads l ON l.id = q.lead_id
+         LEFT JOIN LATERAL (
+            SELECT COUNT(*)::int AS total_calls
+            FROM calls cl
+            WHERE cl.site_id = q.site_id AND cl.lead_id = q.lead_id
+         ) cc ON TRUE
+         WHERE q.site_id = $1
+                     AND q.queued_by = $2
+           AND q.status = 'PENDING'
+         ORDER BY q.queued_at DESC
+                 LIMIT $3 OFFSET $4`,
+                [dbUser.site_id, req.user.id, limit, offset]
+    );
+
+    res.json({
+        success: true,
+        items: result.rows,
+        pagination: {
+            total,
+            page,
+            limit,
+            totalPages: Math.max(1, Math.ceil(total / limit)),
+        },
+    });
+});
+
+// ============================================================
 // QUICK LOG — Agent taps call icon, system captures start time
 // ============================================================
 export const quickLogCall = asyncHandler(async (req, res) => {
-    const { lead_id, phone_number, call_source } = req.body;
+    const { lead_id, phone_number, call_source, shift_queue_id } = req.body;
+    const ALLOWED_CALL_SOURCES = new Set(['WEB', 'APP', 'MANUAL', 'NATIVE_DETECTED']);
+    const normalizedCallSource = ALLOWED_CALL_SOURCES.has(call_source) ? call_source : 'WEB';
 
     if (!lead_id && !phone_number) {
         return res.status(400).json({ success: false, message: 'Lead ID or Phone Number is required' });
@@ -500,7 +587,7 @@ export const quickLogCall = asyncHandler(async (req, res) => {
         call_end: req.body.duration_seconds ? new Date().toISOString() : null,
         duration_seconds: req.body.duration_seconds || 0,
         call_status: req.body.call_status || (req.body.duration_seconds ? 'COMPLETED' : 'ACTIVE'),
-        call_source: call_source || 'WEB',
+        call_source: normalizedCallSource,
         phone_number_dialed: targetPhone,
         is_manual_log: false,
     }, pool);
@@ -513,7 +600,36 @@ export const quickLogCall = asyncHandler(async (req, res) => {
         }
     }
 
+    if (shift_queue_id) {
+        await ensureShiftToCallTable(pool);
+        await pool.query(
+            `UPDATE shift_to_call_queue
+             SET status = 'CALLED', called_at = NOW(), last_call_id = $1, updated_at = NOW()
+             WHERE id = $2 AND site_id = $3 AND queued_by = $4`,
+            [call.id, shift_queue_id, siteId, req.user.id]
+        );
+
+        // Convert the queued contact only when an actual shift-queue call is placed.
+        if (targetLeadId) {
+            await pool.query(
+                `UPDATE contacts c
+                 SET is_converted = TRUE,
+                     converted_lead_id = COALESCE(c.converted_lead_id, $1),
+                     updated_at = NOW()
+                 FROM shift_to_call_queue q
+                 WHERE q.id = $2
+                   AND q.site_id = $3
+                   AND q.queued_by = $4
+                   AND c.id = q.contact_id
+                   AND c.site_id = q.site_id`,
+                [targetLeadId, shift_queue_id, siteId, req.user.id]
+            );
+        }
+    }
+
     bustCache('cache:*:/api/calls*');
+    bustCache('cache:*:/api/contacts*');
+    bustCache('cache:*:/api/leads*');
 
     res.status(201).json({
         success: true,

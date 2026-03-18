@@ -13,6 +13,7 @@ import {
     bulkLogCalls,
     getFollowupCompliance,
     getLeadsForDialer,
+    getShiftToCallQueue,
     quickLogCall,
     endCallSession,
     getAgentCallDetails,
@@ -30,6 +31,7 @@ router.get('/outcomes', cacheMiddleware(600), getCallOutcomes);
 
 // Leads Dialer — live list of leads; short TTL
 router.get('/leads-dialer', cacheMiddleware(60), getLeadsForDialer);
+router.get('/shift-to-call', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(15), getShiftToCallQueue);
 
 // Analytics
 router.get('/analytics', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getCallAnalytics);

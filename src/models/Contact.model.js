@@ -6,7 +6,7 @@ class Contact extends MasterModel {
     }
 
     async findWithDetails(filters, page, limit, pool) {
-        const whereClauses = ['c.site_id = $1', 'c.is_converted = FALSE'];
+        const whereClauses = ['c.site_id = $1'];
         const params = [filters.site_id];
         let paramIndex = 2;
 
@@ -34,9 +34,17 @@ class Contact extends MasterModel {
         params.push(limit, offset);
 
         const dataResult = await pool.query(
-            `SELECT c.*, u.name as created_by_name
+                        `SELECT c.*, u.name as created_by_name,
+                                        COALESCE(cc.total_calls, 0)::int AS calls_dialed
              FROM ${this.tableName} c
              LEFT JOIN users u ON c.created_by = u.id
+                         LEFT JOIN LATERAL (
+                                SELECT COUNT(*)::int AS total_calls
+                                FROM calls cl
+                                WHERE cl.site_id = c.site_id
+                                    AND c.converted_lead_id IS NOT NULL
+                                    AND cl.lead_id = c.converted_lead_id
+                         ) cc ON TRUE
              ${whereString}
              ORDER BY c.created_at DESC
              LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,

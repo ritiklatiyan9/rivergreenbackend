@@ -6,7 +6,7 @@ class CallModel extends MasterModel {
   }
 
   // List calls with joined data — paginated, filterable, role-scoped
-  async findWithDetails({ siteId, assignedTo, teamId, leadId, outcomeId, leadCategory, dateFrom, dateTo, page = 1, limit = 20 }, pool) {
+  async findWithDetails({ siteId, assignedTo, teamId, leadId, outcomeId, leadCategory, callType, dateFrom, dateTo, page = 1, limit = 20 }, pool) {
     const conditions = ['c.site_id = $1'];
     const params = [siteId];
     let idx = 2;
@@ -30,6 +30,10 @@ class CallModel extends MasterModel {
     if (leadCategory && leadCategory !== 'ALL') {
       conditions.push(`l.lead_category = $${idx++}`);
       params.push(leadCategory);
+    }
+    if (callType && callType !== 'ALL') {
+      conditions.push(`c.call_type = $${idx++}`);
+      params.push(callType);
     }
     if (dateFrom) {
       conditions.push(`c.call_start >= $${idx++}`);

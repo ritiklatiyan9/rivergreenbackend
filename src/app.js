@@ -21,7 +21,7 @@ app.use(cors({
   origin: (origin, callback) => callback(null, origin || true),
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-refresh-token'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-refresh-token', 'x-site-id'],
 }));
 app.use(cookieParser());
 app.use(express.json());
