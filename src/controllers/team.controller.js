@@ -2,8 +2,14 @@ import asyncHandler from '../utils/asyncHandler.js';
 import teamModel from '../models/Team.model.js';
 import teamTargetModel from '../models/TeamTarget.model.js';
 import userModel from '../models/User.model.js';
+import { hashPassword } from '../config/jwt.js';
 import pool from '../config/db.js';
 import { bustCache } from '../middlewares/cache.middleware.js';
+
+const sanitizeUser = (user) => {
+  const { password, refresh_token, token_version, ...safe } = user;
+  return safe;
+};
 
 // ============================================================
 // TEAM CRUD
@@ -263,6 +269,68 @@ export const removeTeamMember = asyncHandler(async (req, res) => {
   bustCache('cache:*:/api/site/*');
 
   res.json({ success: true, message: `${targetUser.name} removed from ${team.name}` });
+});
+
+// ============================================================
+// TEAM HEAD - REGISTER AGENT IN OWN TEAM
+// ============================================================
+
+export const registerTeamAgent = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { name, email, password, phone } = req.body;
+
+  if (!name || !email || !password) {
+    return res.status(400).json({ success: false, message: 'Name, email and password are required' });
+  }
+
+  const actor = await userModel.findById(req.user.id, pool);
+  if (!actor || !actor.site_id) {
+    return res.status(404).json({ success: false, message: 'No site assigned' });
+  }
+
+  const team = await teamModel.findByIdAndSite(id, actor.site_id, pool);
+  if (!team) {
+    return res.status(404).json({ success: false, message: 'Team not found' });
+  }
+
+  const isAdmin = ['ADMIN', 'OWNER'].includes(actor.role);
+  const isOwnTeamHead = actor.role === 'TEAM_HEAD' && String(team.head_id) === String(actor.id);
+  if (!isAdmin && !isOwnTeamHead) {
+    return res.status(403).json({ success: false, message: 'Only this team head can register agents for this team' });
+  }
+
+  const existing = await userModel.findByEmail(email, pool);
+  if (existing) {
+    return res.status(400).json({ success: false, message: 'Email already exists' });
+  }
+
+  const sponsorCode = await userModel.getUniqueSponsorCode(pool);
+  const hashedPassword = await hashPassword(password);
+
+  const sponsorId = team.head_id || actor.id;
+  const newUser = await userModel.create({
+    name,
+    email,
+    phone: phone || null,
+    password: hashedPassword,
+    role: 'AGENT',
+    site_id: actor.site_id,
+    team_id: team.id,
+    sponsor_code: sponsorCode,
+    sponsor_id: sponsorId,
+    parent_id: sponsorId,
+    token_version: 1,
+    created_by: actor.id,
+  }, pool);
+
+  bustCache('cache:*:/api/teams*');
+  bustCache('cache:*:/api/site/users*');
+
+  res.status(201).json({
+    success: true,
+    message: 'Agent registered successfully',
+    user: sanitizeUser(newUser),
+  });
 });
 
 // ============================================================

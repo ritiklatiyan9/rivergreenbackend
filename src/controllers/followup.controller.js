@@ -133,7 +133,12 @@ export const getFollowupCounts = asyncHandler(async (req, res) => {
     }
 
     const assignedTo = req.user.role === 'AGENT' ? req.user.id : null;
-    const counts = await followupModel.getCounts(dbUser.site_id, assignedTo, pool);
+    const teamId = req.user.role === 'TEAM_HEAD' ? dbUser.team_id : null;
+    const counts = await followupModel.getCounts({
+        siteId: dbUser.site_id,
+        assignedTo,
+        teamId,
+    }, pool);
     res.json({ success: true, counts });
 });
 

@@ -535,8 +535,24 @@ export const getShiftToCallQueue = asyncHandler(async (req, res) => {
 // ============================================================
 export const quickLogCall = asyncHandler(async (req, res) => {
     const { lead_id, phone_number, call_source, shift_queue_id } = req.body;
-    const ALLOWED_CALL_SOURCES = new Set(['WEB', 'APP', 'MANUAL', 'NATIVE_DETECTED']);
-    const normalizedCallSource = ALLOWED_CALL_SOURCES.has(call_source) ? call_source : 'WEB';
+    const normalizeUpper = (value) => String(value || '').trim().toUpperCase();
+
+    const ALLOWED_CALL_SOURCES = new Set(['WEB', 'APP', 'MANUAL']);
+    const ALLOWED_CALL_STATUS = new Set(['RINGING', 'ACTIVE', 'COMPLETED', 'MISSED', 'FAILED']);
+    const normalizedSourceCandidate = normalizeUpper(call_source);
+    const normalizedCallSource = ALLOWED_CALL_SOURCES.has(normalizedSourceCandidate)
+        ? normalizedSourceCandidate
+        : 'WEB';
+
+    const rawCallType = normalizeUpper(req.body.call_type);
+    const normalizedCallType = ['MISSED', 'MISSED_CALL', 'INCOMING_MISSED', 'UNANSWERED', 'REJECTED', 'DECLINED'].includes(rawCallType)
+        ? 'MISSED'
+        : (rawCallType === 'INCOMING' || rawCallType === 'OUTGOING' ? rawCallType : 'OUTGOING');
+
+    const rawCallStatus = normalizeUpper(req.body.call_status);
+    const normalizedCallStatus = ALLOWED_CALL_STATUS.has(rawCallStatus)
+        ? rawCallStatus
+        : ((Number(req.body.duration_seconds) || 0) > 0 ? 'COMPLETED' : 'ACTIVE');
 
     if (!lead_id && !phone_number) {
         return res.status(400).json({ success: false, message: 'Lead ID or Phone Number is required' });
@@ -582,11 +598,11 @@ export const quickLogCall = asyncHandler(async (req, res) => {
         lead_id: targetLeadId || null,
         assigned_to: req.user.id,
         created_by: req.user.id,
-        call_type: req.body.call_type || 'OUTGOING',
+        call_type: normalizedCallType,
         call_start: req.body.call_start || new Date().toISOString(),
         call_end: req.body.duration_seconds ? new Date().toISOString() : null,
         duration_seconds: req.body.duration_seconds || 0,
-        call_status: req.body.call_status || (req.body.duration_seconds ? 'COMPLETED' : 'ACTIVE'),
+        call_status: normalizedCallStatus,
         call_source: normalizedCallSource,
         phone_number_dialed: targetPhone,
         is_manual_log: false,

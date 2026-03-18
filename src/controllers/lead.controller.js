@@ -158,7 +158,7 @@ export const getLead = asyncHandler(async (req, res) => {
 // ============================================================
 export const updateLead = asyncHandler(async (req, res) => {
     const { id } = req.params;
-    const { name, phone, email, address, profession, status, assigned_to, notes, lead_category } = req.body;
+    const { name, phone, email, address, profession, status, assigned_to, notes, lead_category, lead_source } = req.body;
 
     const siteId = await getSiteId(req.user.id);
     const existingLead = await leadModel.findById(id, pool);
@@ -181,6 +181,7 @@ export const updateLead = asyncHandler(async (req, res) => {
     if (profession !== undefined) updateData.profession = profession || null;
     if (status !== undefined) updateData.status = status;
     if (notes !== undefined) updateData.notes = notes || null;
+    if (lead_source !== undefined) updateData.lead_source = lead_source || 'Other';
     if (lead_category !== undefined) {
         updateData.lead_category = (lead_category && VALID_CATEGORIES.includes(lead_category)) ? lead_category : null;
     }

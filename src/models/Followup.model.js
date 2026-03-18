@@ -162,23 +162,35 @@ class FollowupModel extends MasterModel {
     }
 
     // Dashboard counts
-    async getCounts(siteId, assignedTo, pool) {
-        const userFilter = assignedTo ? `AND assigned_to = $2` : '';
-        const params = assignedTo ? [siteId, assignedTo] : [siteId];
+        async getCounts({ siteId, assignedTo = null, teamId = null }, pool) {
+                const conditions = ['f.site_id = $1'];
+                const params = [siteId];
+                let idx = 2;
 
-        const query = `
-      SELECT
-        COUNT(*) FILTER (WHERE status = 'PENDING' AND scheduled_at >= NOW()) as scheduled,
-        COUNT(*) FILTER (WHERE status = 'PENDING' AND scheduled_at < NOW()) as missed,
-        COUNT(*) FILTER (WHERE status = 'COMPLETED') as completed,
-        COUNT(*) FILTER (WHERE status = 'ESCALATED') as escalated,
-        COUNT(*) FILTER (WHERE scheduled_at::date = CURRENT_DATE AND status IN ('PENDING','SNOOZED')) as today
-      FROM ${this.tableName}
-      WHERE site_id = $1 ${userFilter}
-    `;
-        const result = await pool.query(query, params);
-        return result.rows[0];
-    }
+                if (assignedTo) {
+                        conditions.push(`f.assigned_to = $${idx++}`);
+                        params.push(assignedTo);
+                }
+                if (teamId) {
+                        conditions.push(`u.team_id = $${idx++}`);
+                        params.push(teamId);
+                }
+
+                const where = conditions.join(' AND ');
+                const query = `
+            SELECT
+                COUNT(*) FILTER (WHERE f.status = 'PENDING' AND f.scheduled_at >= NOW()) as scheduled,
+                COUNT(*) FILTER (WHERE f.status = 'PENDING' AND f.scheduled_at < NOW()) as missed,
+                COUNT(*) FILTER (WHERE f.status = 'COMPLETED') as completed,
+                COUNT(*) FILTER (WHERE f.status = 'ESCALATED') as escalated,
+                COUNT(*) FILTER (WHERE f.scheduled_at::date = CURRENT_DATE AND f.status IN ('PENDING','SNOOZED')) as today
+            FROM ${this.tableName} f
+            LEFT JOIN users u ON f.assigned_to = u.id
+            WHERE ${where}
+        `;
+                const result = await pool.query(query, params);
+                return result.rows[0];
+        }
 }
 
 export default new FollowupModel();

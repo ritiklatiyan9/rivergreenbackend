@@ -11,6 +11,7 @@ import {
   removeTeamHead,
   moveAgent,
   removeTeamMember,
+  registerTeamAgent,
   getTeamPerformance,
   getTeamMembersPerformance,
   getAllTeamsPerformance,
@@ -32,6 +33,9 @@ router.get('/:id', authMiddleware, cacheMiddleware(300), getTeam);
 router.get('/:id/performance', authMiddleware, cacheMiddleware(300), getTeamPerformance);
 router.get('/:id/members-performance', authMiddleware, cacheMiddleware(120), getTeamMembersPerformance);
 router.get('/:id/targets', authMiddleware, cacheMiddleware(300), getTeamTargets);
+
+// Team head/admin can register AGENT under the specified team
+router.post('/:id/register-agent', authMiddleware, checkRole(['TEAM_HEAD', 'ADMIN', 'OWNER']), registerTeamAgent);
 
 // Admin-only routes below
 router.use(checkRole(['ADMIN']));
