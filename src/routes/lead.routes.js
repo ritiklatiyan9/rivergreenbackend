@@ -15,6 +15,7 @@ import {
     getLeadAssignmentHistory,
     getAllAssignmentHistory,
     getAssignableUsers,
+    shiftLeadsToCall,
 } from '../controllers/lead.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import checkRole from '../middlewares/role.middleware.js';
@@ -65,6 +66,7 @@ router.get('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddle
 router.get('/assignable-users', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(300), getAssignableUsers);
 router.get('/assignment-history', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getAllAssignmentHistory);
 router.post('/bulk-assign', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), bulkAssignLeads);
+router.post('/shift-to-call', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), shiftLeadsToCall);
 
 // Single lead routes
 router.get('/:id/full', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getLeadFullDetails);

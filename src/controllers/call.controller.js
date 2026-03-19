@@ -497,13 +497,13 @@ export const getShiftToCallQueue = asyncHandler(async (req, res) => {
                 q.contact_id,
                 q.lead_id,
                 q.queued_at,
-                c.name AS contact_name,
-                c.phone,
+                COALESCE(c.name, l.name) AS contact_name,
+                COALESCE(c.phone, l.phone) AS phone,
                 l.status AS lead_status,
                 l.lead_category,
                 COALESCE(cc.total_calls, 0)::int AS total_calls
          FROM shift_to_call_queue q
-         JOIN contacts c ON c.id = q.contact_id
+         LEFT JOIN contacts c ON c.id = q.contact_id
          LEFT JOIN leads l ON l.id = q.lead_id
          LEFT JOIN LATERAL (
             SELECT COUNT(*)::int AS total_calls

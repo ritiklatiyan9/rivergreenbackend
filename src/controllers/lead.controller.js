@@ -680,3 +680,172 @@ export const getBulkJobStatus = asyncHandler(async (req, res) => {
         completedAt: job.completed_at,
     });
 });
+
+// ============================================================
+// SHIFT LEADS TO CALL — move leads to call queue
+// ============================================================
+const ensureShiftToCallTable = async (db) => {
+    await db.query(`
+        CREATE TABLE IF NOT EXISTS shift_to_call_queue (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            site_id UUID NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+            contact_id UUID REFERENCES contacts(id) ON DELETE CASCADE,
+            lead_id UUID REFERENCES leads(id) ON DELETE CASCADE,
+            queued_by UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            status VARCHAR(20) NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'CALLED', 'REMOVED')),
+            queued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            called_at TIMESTAMPTZ,
+            last_call_id UUID REFERENCES calls(id) ON DELETE SET NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            CONSTRAINT uq_shift_to_call UNIQUE (site_id, contact_id, queued_by),
+            CONSTRAINT uq_shift_to_call_lead UNIQUE (site_id, lead_id, queued_by)
+        );
+    `);
+
+    // Ensure contact_id is nullable (in case table was created with NOT NULL by contact.controller.js)
+    try {
+        await db.query('ALTER TABLE shift_to_call_queue ALTER COLUMN contact_id DROP NOT NULL');
+    } catch (err) {
+        // Column might already be nullable, ignore error
+    }
+
+    await db.query('CREATE INDEX IF NOT EXISTS idx_shift_to_call_site_status ON shift_to_call_queue(site_id, status, queued_by)');
+    await db.query('CREATE INDEX IF NOT EXISTS idx_shift_to_call_lead ON shift_to_call_queue(lead_id)');
+};
+
+export const shiftLeadsToCall = asyncHandler(async (req, res) => {
+    const siteId = await getSiteId(req.user.id);
+    if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
+
+    const { lead_ids = [], select_all = false, search = '', status = '', lead_category = '' } = req.body || {};
+
+    if (!select_all && (!Array.isArray(lead_ids) || lead_ids.length === 0)) {
+        return res.status(400).json({ success: false, message: 'Select at least one lead' });
+    }
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        await ensureShiftToCallTable(client);
+
+        const role = req.user.role;
+        const scopedToUser = role === 'AGENT' || role === 'TEAM_HEAD';
+
+        const baseParams = [siteId];
+        let where = 'WHERE l.site_id = $1';
+        let idx = 2;
+
+        if (scopedToUser) {
+            where += ` AND l.assigned_to = $${idx++}`;
+            baseParams.push(req.user.id);
+        }
+
+        if (select_all) {
+            if (search && String(search).trim()) {
+                where += ` AND (l.name ILIKE $${idx} OR l.phone ILIKE $${idx})`;
+                baseParams.push(`%${String(search).trim()}%`);
+                idx++;
+            }
+            if (status && String(status).trim()) {
+                where += ` AND l.status = $${idx}`;
+                baseParams.push(status);
+                idx++;
+            }
+            if (lead_category && String(lead_category).trim()) {
+                where += ` AND l.lead_category = $${idx}`;
+                baseParams.push(lead_category);
+                idx++;
+            }
+        } else {
+            where += ` AND l.id = ANY($${idx}::uuid[])`;
+            baseParams.push(lead_ids);
+            idx++;
+        }
+
+        const leadsResult = await client.query(
+            `SELECT l.id, l.name, l.phone, l.email
+             FROM leads l
+             ${where}
+             ORDER BY l.created_at DESC`,
+            baseParams
+        );
+
+        if (leadsResult.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ success: false, message: 'No leads found for shift' });
+        }
+
+        // Keep queue scoped to the latest shift action: any previously pending
+        // entries not in current selection are marked removed.
+        const selectedIds = leadsResult.rows.map((l) => l.id);
+        await client.query(
+            `UPDATE shift_to_call_queue
+             SET status = 'REMOVED', updated_at = NOW()
+             WHERE site_id = $1
+               AND queued_by = $2
+               AND status = 'PENDING'
+               AND NOT (lead_id = ANY($3::uuid[]))`,
+            [siteId, req.user.id, selectedIds]
+        );
+
+        let shiftedCount = 0;
+        const shiftedItems = [];
+
+        for (const lead of leadsResult.rows) {
+            // Check if already exists and update, otherwise insert
+            const existingResult = await client.query(
+                `SELECT id FROM shift_to_call_queue
+                 WHERE site_id = $1 AND lead_id = $2 AND queued_by = $3`,
+                [siteId, lead.id, req.user.id]
+            );
+
+            let queueId;
+            if (existingResult.rows[0]) {
+                // Update existing entry
+                queueId = existingResult.rows[0].id;
+                await client.query(
+                    `UPDATE shift_to_call_queue
+                     SET status = 'PENDING', queued_at = NOW(), called_at = NULL, last_call_id = NULL, updated_at = NOW()
+                     WHERE id = $1`,
+                    [queueId]
+                );
+            } else {
+                // Insert new entry
+                const queueResult = await client.query(
+                    `INSERT INTO shift_to_call_queue (site_id, contact_id, lead_id, queued_by, status, queued_at, called_at, last_call_id, updated_at)
+                     VALUES ($1, NULL, $2, $3, 'PENDING', NOW(), NULL, NULL, NOW())
+                     RETURNING id`,
+                    [siteId, lead.id, req.user.id]
+                );
+                queueId = queueResult.rows[0].id;
+            }
+
+            shiftedCount++;
+            shiftedItems.push({
+                queue_id: queueId,
+                lead_id: lead.id,
+                name: lead.name,
+                phone: lead.phone,
+                email: lead.email,
+            });
+        }
+
+        await client.query('COMMIT');
+
+        bustLeadCache();
+        bustCache('cache:*:/api/calls*');
+
+        res.json({
+            success: true,
+            shifted_count: shiftedCount,
+            items: shiftedItems,
+            message: `${shiftedCount} lead${shiftedCount > 1 ? 's' : ''} shifted to call queue`,
+        });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+    } finally {
+        client.release();
+    }
+});
