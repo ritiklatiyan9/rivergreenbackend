@@ -1,5 +1,6 @@
 import { verifyToken } from '../config/jwt.js';
 import pool from '../config/db.js';
+import { ensureUserSiteAccessTable, getUserAssignedSiteIds } from '../utils/userSiteAccess.js';
 
 const authMiddleware = async (req, res, next) => {
   const token = req.header('Authorization')?.replace('Bearer ', '');
@@ -21,7 +22,14 @@ const authMiddleware = async (req, res, next) => {
       return res.status(401).json({ message: 'Session expired. Please login again.' });
     }
 
+    await ensureUserSiteAccessTable(pool);
+    const assignedSiteIds = await getUserAssignedSiteIds(dbUser.id, pool, { includePrimary: true });
+
     let effectiveSiteId = dbUser.site_id || null;
+    if (!effectiveSiteId && assignedSiteIds.length > 0) {
+      effectiveSiteId = assignedSiteIds[0];
+    }
+
     const requestedSiteId = req.header('x-site-id') || null;
 
     if (requestedSiteId) {
@@ -33,7 +41,7 @@ const authMiddleware = async (req, res, next) => {
         if (siteCheck.rows[0]) {
           effectiveSiteId = siteCheck.rows[0].id;
         }
-      } else if (String(requestedSiteId) === String(dbUser.site_id || '')) {
+      } else if (assignedSiteIds.includes(String(requestedSiteId))) {
         effectiveSiteId = requestedSiteId;
       }
     }

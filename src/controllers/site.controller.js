@@ -3,6 +3,7 @@ import { hashPassword } from '../config/jwt.js';
 import userModel from '../models/User.model.js';
 import siteModel from '../models/Site.model.js';
 import userProfileModel from '../models/UserProfile.model.js';
+import teamModel from '../models/Team.model.js';
 import pool from '../config/db.js';
 import { bustCache } from '../middlewares/cache.middleware.js';
 
@@ -11,7 +12,7 @@ const sanitizeUser = (user) => {
   return safe;
 };
 
-const VALID_ROLES = ['TEAM_HEAD', 'AGENT', 'CLIENT', 'VISITOR'];
+const VALID_ROLES = ['TEAM_HEAD', 'AGENT'];
 
 // ============================================================
 // USER MANAGEMENT (Admin manages users within their site)
@@ -99,7 +100,21 @@ export const getSiteUser = asyncHandler(async (req, res) => {
 
 // Create a user in admin's site
 export const createSiteUser = asyncHandler(async (req, res) => {
-  const { name, email, password, phone, role, sponsor_code: sponsorRefCode, category_id, profile_data, alternate_mobile, account_status, profile_photo } = req.body;
+  const {
+    name,
+    email,
+    password,
+    phone,
+    role,
+    sponsor_code: sponsorRefCode,
+    category_id,
+    profile_data,
+    alternate_mobile,
+    account_status,
+    profile_photo,
+    team_id,
+    new_team_name,
+  } = req.body;
   const sponsorRef = sponsorRefCode ? String(sponsorRefCode).trim() : null;
 
   if (!name || !email || !password || !role) {
@@ -108,6 +123,10 @@ export const createSiteUser = asyncHandler(async (req, res) => {
 
   if (!VALID_ROLES.includes(role)) {
     return res.status(400).json({ success: false, message: `Invalid role. Must be one of: ${VALID_ROLES.join(', ')}` });
+  }
+
+  if (team_id && new_team_name) {
+    return res.status(400).json({ success: false, message: 'Provide either team_id or new_team_name, not both' });
   }
 
   const adminUser = await userModel.findById(req.user.id, pool);
@@ -139,10 +158,24 @@ export const createSiteUser = asyncHandler(async (req, res) => {
     sponsorId = sponsor.id;
     parentId = sponsor.id;
   } else {
-    if (role === 'TEAM_HEAD') {
-      parentId = adminUser.id;
-      sponsorId = adminUser.id;
+    parentId = adminUser.id;
+    sponsorId = adminUser.id;
+  }
+
+  let resolvedTeamId = null;
+  if (team_id) {
+    const existingTeam = await teamModel.findByIdAndSite(team_id, adminUser.site_id, pool);
+    if (!existingTeam) {
+      return res.status(404).json({ success: false, message: 'Selected team not found in your site' });
     }
+    resolvedTeamId = existingTeam.id;
+  } else if (new_team_name && String(new_team_name).trim()) {
+    const createdTeam = await teamModel.create({
+      name: String(new_team_name).trim(),
+      site_id: adminUser.site_id,
+      head_id: null,
+    }, pool);
+    resolvedTeamId = createdTeam.id;
   }
 
   const userData = {
@@ -155,6 +188,7 @@ export const createSiteUser = asyncHandler(async (req, res) => {
     sponsor_code: newSponsorCode,
     sponsor_id: sponsorId,
     parent_id: parentId,
+    team_id: resolvedTeamId,
     token_version: 1,
     alternate_mobile: alternate_mobile || null,
     account_status: account_status || 'Active',
@@ -163,6 +197,10 @@ export const createSiteUser = asyncHandler(async (req, res) => {
   };
 
   const newUser = await userModel.create(userData, pool);
+
+  if (role === 'TEAM_HEAD' && resolvedTeamId) {
+    await teamModel.update(resolvedTeamId, { head_id: newUser.id }, pool);
+  }
 
   // Save extended profile data if provided
   if (category_id && profile_data) {
@@ -176,6 +214,7 @@ export const createSiteUser = asyncHandler(async (req, res) => {
   }
 
   bustCache('cache:*:/api/site/*');
+  bustCache('cache:*:/api/teams*');
   res.status(201).json({ success: true, user: sanitizeUser(newUser) });
 });
 

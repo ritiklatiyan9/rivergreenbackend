@@ -4,6 +4,7 @@ import userModel from '../models/User.model.js';
 import siteModel from '../models/Site.model.js';
 import pool from '../config/db.js';
 import { uploadSingle } from '../utils/upload.js';
+import { ensureUserSiteAccessTable, getUserAssignedSiteIds } from '../utils/userSiteAccess.js';
 
 const REFRESH_COOKIE_OPTIONS = {
   httpOnly: true,
@@ -39,10 +40,19 @@ const getAccessibleSitesForUser = async (user) => {
     return sites.filter((site) => site.is_active !== false);
   }
 
-  if (!user.site_id) return [];
-  const site = await siteModel.findById(user.site_id, pool);
-  if (!site || site.is_active === false) return [];
-  return [site];
+  await ensureUserSiteAccessTable(pool);
+  const assignedSiteIds = await getUserAssignedSiteIds(user.id, pool, { includePrimary: true });
+  if (!assignedSiteIds.length) return [];
+
+  const sitesResult = await pool.query(
+    'SELECT * FROM sites WHERE id = ANY($1::uuid[]) AND is_active = true',
+    [assignedSiteIds],
+  );
+
+  const siteById = new Map(sitesResult.rows.map((site) => [String(site.id), site]));
+  return assignedSiteIds
+    .map((siteId) => siteById.get(String(siteId)))
+    .filter(Boolean);
 };
 
 // Register owner via Postman
@@ -103,8 +113,10 @@ export const login = asyncHandler(async (req, res) => {
     return res.status(401).json({ success: false, message: 'Invalid credentials' });
   }
 
-  const newVersion = (user.token_version || 0) + 1;
-  await userModel.update(user.id, { token_version: newVersion }, pool);
+  const newVersion = user.token_version || 1;
+  if (!user.token_version) {
+    await userModel.update(user.id, { token_version: newVersion }, pool);
+  }
 
   const accessToken = signAccessToken({
     id: user.id,
@@ -144,8 +156,8 @@ export const refresh = asyncHandler(async (req, res) => {
     try {
       const result = await _refreshLocks.get(decoded.id);
       // Second caller piggy-backs on the first caller's result
-      res.cookie('refreshToken', result.newRefreshToken, REFRESH_COOKIE_OPTIONS);
-      return res.json({ success: true, accessToken: result.accessToken, refreshToken: result.newRefreshToken });
+      res.cookie('refreshToken', result.refreshToken, REFRESH_COOKIE_OPTIONS);
+      return res.json({ success: true, accessToken: result.accessToken, refreshToken: result.refreshToken });
     } catch {
       return res.status(401).json({ success: false, message: 'Refresh failed (concurrent)' });
     }
@@ -155,47 +167,48 @@ export const refresh = asyncHandler(async (req, res) => {
     const user = await userModel.findById(decoded.id, pool);
     if (!user || user.token_version !== decoded.version) {
       console.warn(`[Auth] Version mismatch for user ${decoded.id}. Expected ${decoded.version}, found ${user?.token_version}`);
-      if (user) await userModel.update(user.id, { token_version: (user.token_version || 0) + 1, refresh_token: null }, pool);
       res.clearCookie('refreshToken', CLEAR_COOKIE_OPTIONS);
       throw new Error('version_mismatch');
     }
 
     if (!user.is_active) {
-      await userModel.update(user.id, { token_version: (user.token_version || 0) + 1, refresh_token: null }, pool);
       res.clearCookie('refreshToken', CLEAR_COOKIE_OPTIONS);
       throw new Error('inactive_user');
     }
 
+    if (!user.refresh_token) {
+      res.clearCookie('refreshToken', CLEAR_COOKIE_OPTIONS);
+      throw new Error('missing_hash');
+    }
+
     const valid = await comparePassword(refreshToken, user.refresh_token);
     if (!valid) {
-      await userModel.update(user.id, { token_version: (user.token_version || 0) + 1, refresh_token: null }, pool);
       res.clearCookie('refreshToken', CLEAR_COOKIE_OPTIONS);
       throw new Error('invalid_hash');
     }
 
-    const newVersion = (user.token_version || 0) + 1;
-    await userModel.update(user.id, { token_version: newVersion }, pool);
+    // Keep token version stable during refresh so one stale/concurrent refresh
+    // request does not invalidate all in-flight access tokens for this session.
+    const currentVersion = user.token_version || 0;
 
     const accessToken = signAccessToken({
       id: user.id,
       email: user.email,
       role: user.role,
       site_id: user.site_id || null,
-      version: newVersion,
+      version: currentVersion,
     });
-    const newRefreshToken = signRefreshToken({ id: user.id, version: newVersion });
-    const hashedRefresh = await hashRefreshToken(newRefreshToken);
-    await userModel.update(user.id, { refresh_token: hashedRefresh }, pool);
-
-    return { accessToken, newRefreshToken };
+    // Keep refresh token stable so active sessions are not invalidated by
+    // refresh-token rotation races or out-of-order network responses.
+    return { accessToken, refreshToken };
   })();
 
   _refreshLocks.set(decoded.id, work);
 
   try {
     const result = await work;
-    res.cookie('refreshToken', result.newRefreshToken, REFRESH_COOKIE_OPTIONS);
-    res.json({ success: true, accessToken: result.accessToken, refreshToken: result.newRefreshToken });
+    res.cookie('refreshToken', result.refreshToken, REFRESH_COOKIE_OPTIONS);
+    res.json({ success: true, accessToken: result.accessToken, refreshToken: result.refreshToken });
   } catch (err) {
     return res.status(401).json({ success: false, message: 'Invalid refresh token' });
   } finally {

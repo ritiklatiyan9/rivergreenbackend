@@ -294,7 +294,9 @@ export const registerTeamAgent = asyncHandler(async (req, res) => {
   }
 
   const isAdmin = ['ADMIN', 'OWNER'].includes(actor.role);
-  const isOwnTeamHead = actor.role === 'TEAM_HEAD' && String(team.head_id) === String(actor.id);
+  const isOwnTeamHead = actor.role === 'TEAM_HEAD' && (
+    String(team.head_id || '') === String(actor.id) || String(actor.team_id || '') === String(team.id)
+  );
   if (!isAdmin && !isOwnTeamHead) {
     return res.status(403).json({ success: false, message: 'Only this team head can register agents for this team' });
   }

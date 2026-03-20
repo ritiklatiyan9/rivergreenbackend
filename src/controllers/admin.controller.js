@@ -4,6 +4,7 @@ import userModel from '../models/User.model.js';
 import siteModel from '../models/Site.model.js';
 import pool from '../config/db.js';
 import { bustCache } from '../middlewares/cache.middleware.js';
+import { ensureUserSiteAccessTable, setUserAssignedSites } from '../utils/userSiteAccess.js';
 
 const sanitizeUser = (user) => {
   const { password, refresh_token, token_version, ...safe } = user;
@@ -276,15 +277,30 @@ export const getOwnerStats = asyncHandler(async (req, res) => {
 
 // Get all users for access management (exclude owner)
 export const getAllUsersForAccess = asyncHandler(async (req, res) => {
+  await ensureUserSiteAccessTable(pool);
+
   const query = `
     SELECT 
       u.id, u.name, u.email, u.role, u.site_id, u.is_active, u.created_at,
       s.name as site_name,
+      COALESCE(
+        JSON_AGG(
+          DISTINCT JSONB_BUILD_OBJECT('id', assigned_s.id, 'name', assigned_s.name)
+        ) FILTER (WHERE assigned_s.id IS NOT NULL),
+        '[]'::json
+      ) AS assigned_sites,
+      COALESCE(
+        ARRAY_AGG(DISTINCT usa.site_id) FILTER (WHERE usa.site_id IS NOT NULL),
+        ARRAY[]::uuid[]
+      ) AS assigned_site_ids,
       (SELECT COUNT(*)::int FROM leads WHERE assigned_to = u.id) as lead_count,
       (SELECT COUNT(*)::int FROM calls WHERE assigned_to = u.id) as call_count
     FROM users u
     LEFT JOIN sites s ON u.site_id = s.id
+    LEFT JOIN user_site_access usa ON usa.user_id = u.id
+    LEFT JOIN sites assigned_s ON assigned_s.id = usa.site_id
     WHERE u.role != 'OWNER'
+    GROUP BY u.id, u.name, u.email, u.role, u.site_id, u.is_active, u.created_at, s.name
     ORDER BY u.created_at DESC
   `;
   const result = await pool.query(query);
@@ -338,7 +354,9 @@ export const updateUserAccountAccess = asyncHandler(async (req, res) => {
 // Update user site assignments and access
 export const updateUserSiteAccess = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { site_id } = req.body;
+  const { site_id, site_ids } = req.body;
+
+  await ensureUserSiteAccessTable(pool);
 
   const user = await userModel.findById(id, pool);
   if (!user) {
@@ -350,27 +368,32 @@ export const updateUserSiteAccess = asyncHandler(async (req, res) => {
     return res.status(403).json({ success: false, message: 'Cannot change owner site assignment' });
   }
 
-  // Validate site exists if provided
-  if (site_id) {
-    const site = await siteModel.findById(site_id, pool);
+  const incomingSiteIds = Array.isArray(site_ids)
+    ? site_ids
+    : (site_id ? [site_id] : []);
+
+  const normalizedSiteIds = [...new Set(incomingSiteIds
+    .filter(Boolean)
+    .map((v) => String(v)))];
+
+  // Validate all requested sites exist
+  for (const nextSiteId of normalizedSiteIds) {
+    const site = await siteModel.findById(nextSiteId, pool);
     if (!site) {
       return res.status(404).json({ success: false, message: 'Site not found' });
     }
-
-    // Owner can assign any site; Admin can only assign their own site
-    if (req.user.role === 'ADMIN' && String(site.id) !== String(req.user.site_id || '')) {
-      return res.status(403).json({ success: false, message: 'You can only assign your current site' });
-    }
   }
 
-  await userModel.update(id, { site_id: site_id || null }, pool);
+  const assigned = await setUserAssignedSites(id, normalizedSiteIds, pool);
   await bustCache('cache:*:/api/admin/*');
 
   const updated = await userModel.findById(id, pool);
   res.json({
     success: true,
-    message: 'User site assignment updated',
+    message: 'User site assignments updated',
     user: sanitizeUser(updated),
+    assigned_site_ids: assigned.assignedSiteIds,
+    primary_site_id: assigned.primarySiteId,
   });
 });
 
