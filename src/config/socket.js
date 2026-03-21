@@ -1,5 +1,7 @@
 import { Server } from 'socket.io';
 import { verifyToken } from '../config/jwt.js';
+import pool from './db.js';
+import agentLiveLocationModel from '../models/AgentLiveLocation.model.js';
 
 /**
  * Initialize Socket.io for real-time chat
@@ -45,6 +47,27 @@ export const initSocket = (httpServer, app) => {
         userName: socket.user.name,
         isTyping,
       });
+    });
+
+    // Handle background location updates
+    socket.on('updateLocation', async ({ latitude, longitude }) => {
+      try {
+        // Upsert to database
+        const savedRecord = await agentLiveLocationModel.upsertLocation(userId, latitude, longitude, pool);
+        
+        // Broadcast the update to all connected clients (especially Admin map)
+        io.emit('agentLocationUpdated', {
+          user_id: userId,
+          user_name: socket.user.name,
+          profile_photo: socket.user.profile_photo || null,
+          role: socket.user.role || 'AGENT',
+          latitude,
+          longitude,
+          updated_at: savedRecord.updated_at
+        });
+      } catch (err) {
+        console.error('Socket updateLocation error:', err);
+      }
     });
 
     socket.on('disconnect', () => {

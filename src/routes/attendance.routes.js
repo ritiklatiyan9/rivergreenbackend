@@ -18,6 +18,7 @@ import {
   getAttendanceUsers,
   getUserAttendance,
 } from '../controllers/attendance.controller.js';
+import { getLiveLocations } from '../controllers/location.controller.js';
 
 const router = express.Router();
 
@@ -41,5 +42,6 @@ router.get('/records', checkRole(['ADMIN', 'OWNER']), cacheMiddleware(60), getAl
 router.get('/stats', checkRole(['ADMIN', 'OWNER']), cacheMiddleware(60), getDailyStats);
 router.get('/users', checkRole(['ADMIN', 'OWNER']), cacheMiddleware(300), getAttendanceUsers);
 router.get('/user/:userId', checkRole(['ADMIN', 'OWNER']), cacheMiddleware(120), getUserAttendance);
+router.get('/live-locations', checkRole(['ADMIN', 'OWNER']), getLiveLocations);
 
 export default router;
