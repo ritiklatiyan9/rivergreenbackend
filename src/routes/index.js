@@ -21,6 +21,7 @@ import attendanceRoutes from './attendance.routes.js';
 import chatRoutes from './chat.routes.js';
 import financialSettingsRoutes from './financialSettings.routes.js';
 import contactRoutes from './contact.routes.js';
+import directionsRoutes from './directions.routes.js';
 
 router.use('/auth', authRoutes);
 router.use('/upload', uploadRoutes);
@@ -42,5 +43,6 @@ router.use('/attendance', attendanceRoutes);
 router.use('/chat', chatRoutes);
 router.use('/financial-settings', financialSettingsRoutes);
 router.use('/contacts', contactRoutes);
+router.use('/directions', directionsRoutes);
 
 export default router;
