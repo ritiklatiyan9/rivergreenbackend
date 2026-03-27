@@ -170,8 +170,13 @@ export const createSiteUser = asyncHandler(async (req, res) => {
     }
     resolvedTeamId = existingTeam.id;
   } else if (new_team_name && String(new_team_name).trim()) {
+    const tName = String(new_team_name).trim();
+    const existingTeam = await teamModel.findByNameAndSite(tName, adminUser.site_id, pool);
+    if (existingTeam) {
+      return res.status(400).json({ success: false, message: `Team "${tName}" already exists.` });
+    }
     const createdTeam = await teamModel.create({
-      name: String(new_team_name).trim(),
+      name: tName,
       site_id: adminUser.site_id,
       head_id: null,
     }, pool);

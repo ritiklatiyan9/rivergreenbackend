@@ -27,6 +27,11 @@ export const createTeam = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }
 
+  const existing = await teamModel.findByNameAndSite(name, adminUser.site_id, pool);
+  if (existing) {
+    return res.status(400).json({ success: false, message: `Team "${name}" already exists.` });
+  }
+
   const team = await teamModel.create({ name, site_id: adminUser.site_id }, pool);
   bustCache('cache:*:/api/teams*');
   res.status(201).json({ success: true, team });

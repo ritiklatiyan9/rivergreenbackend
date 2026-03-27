@@ -29,6 +29,13 @@ class TeamModel extends MasterModel {
     return result.rows[0];
   }
 
+  // Find team by name ensuring site scope (case-insensitive)
+  async findByNameAndSite(name, siteId, pool) {
+    const query = `SELECT * FROM ${this.tableName} WHERE name ILIKE $1 AND site_id = $2`;
+    const result = await pool.query(query, [name, siteId]);
+    return result.rows[0];
+  }
+
   // Get performance stats for a team
   async getPerformance(teamId, pool) {
     const query = `
