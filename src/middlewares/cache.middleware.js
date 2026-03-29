@@ -92,6 +92,11 @@ export const cacheMiddleware = (ttl = 300) => {
         // Cache miss → intercept res.json to populate both tiers
         const originalJson = res.json.bind(res);
         res.json = (body) => {
+            // Never cache error responses
+            if (body && body.success === false) {
+                res.setHeader('X-Cache', 'SKIP');
+                return originalJson(body);
+            }
             if (isRedisAvailable()) {
                 redisClient
                     .setEx(cacheKey, ttl, JSON.stringify(body))

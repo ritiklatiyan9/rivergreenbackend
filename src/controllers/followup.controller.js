@@ -223,11 +223,11 @@ export const escalateFollowup = asyncHandler(async (req, res) => {
     const agent = await userModel.findById(existing.assigned_to, pool);
     let escalateTo = null;
     if (agent && agent.team_id) {
-        const teamHead = await pool.query(
-            'SELECT head_id FROM teams WHERE id = $1', [agent.team_id]
+        const teamHeads = await pool.query(
+            'SELECT user_id FROM team_heads WHERE team_id = $1 ORDER BY created_at LIMIT 1', [agent.team_id]
         );
-        if (teamHead.rows[0]?.head_id) {
-            escalateTo = teamHead.rows[0].head_id;
+        if (teamHeads.rows[0]?.user_id) {
+            escalateTo = teamHeads.rows[0].user_id;
         }
     }
 

@@ -543,6 +543,181 @@ export const updateBookingStatus = asyncHandler(async (req, res) => {
 });
 
 // ============================================================
+// PUBLIC BOOKING BY LABEL (no auth — from website map, auto-creates plot if missing)
+// ============================================================
+export const publicBookByLabel = asyncHandler(async (req, res) => {
+  const {
+    plot_label, site_id,
+    client_name, client_phone, client_email, client_address,
+    booking_amount, payment_method, transaction_id,
+    ref_sponsor_code, remarks,
+  } = req.body;
+
+  if (!plot_label || !site_id) {
+    return res.status(400).json({ success: false, message: 'Plot label and site ID are required' });
+  }
+  if (!client_name || !client_phone) {
+    return res.status(400).json({ success: false, message: 'Client name and phone are required' });
+  }
+  if (!booking_amount || Number(booking_amount) <= 0) {
+    return res.status(400).json({ success: false, message: 'Valid booking amount is required' });
+  }
+
+  // Resolve site_id — accept numeric index (1-based) or UUID
+  let resolvedSiteId = site_id;
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (!uuidRegex.test(resolvedSiteId)) {
+    const idx = parseInt(resolvedSiteId, 10);
+    if (isNaN(idx) || idx < 1) {
+      return res.status(400).json({ success: false, message: 'Invalid site identifier' });
+    }
+    const siteRes = await pool.query(
+      'SELECT id FROM sites ORDER BY created_at ASC LIMIT 1 OFFSET $1',
+      [idx - 1]
+    );
+    if (siteRes.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Site not found' });
+    }
+    resolvedSiteId = siteRes.rows[0].id;
+  }
+
+  const normalizedLabel = plot_label.replace(/[()]/g, '').trim().toUpperCase();
+
+  // Try to find an existing plot by plot_number in any colony map for this site
+  let plot = null;
+  const findRes = await pool.query(
+    `SELECT mp.* FROM map_plots mp
+     JOIN colony_maps cm ON mp.colony_map_id = cm.id
+     WHERE cm.site_id = $1
+       AND UPPER(REPLACE(REPLACE(mp.plot_number, '-', ''), '.', ''))
+         = UPPER(REPLACE(REPLACE($2, '-', ''), '.', ''))
+     LIMIT 1`,
+    [resolvedSiteId, normalizedLabel]
+  );
+  if (findRes.rows.length > 0) {
+    plot = findRes.rows[0];
+  }
+
+  // If no plot exists, auto-create it under the first colony map for this site
+  if (!plot) {
+    let colonyMapId;
+    const cmRes = await pool.query(
+      'SELECT id FROM colony_maps WHERE site_id = $1 ORDER BY created_at ASC LIMIT 1',
+      [resolvedSiteId]
+    );
+    if (cmRes.rows.length > 0) {
+      colonyMapId = cmRes.rows[0].id;
+    } else {
+      // Create a default colony map for this site, using the site's name
+      const siteNameRes = await pool.query('SELECT name FROM sites WHERE id = $1', [resolvedSiteId]);
+      const siteName = siteNameRes.rows[0]?.name || 'Colony Map';
+      const newCmId = randomUUID();
+      await pool.query(
+        `INSERT INTO colony_maps (id, site_id, name, image_url, image_width, image_height, created_at, updated_at)
+         VALUES ($1, $2, $3, '', 1460, 1370, NOW(), NOW())`,
+        [newCmId, resolvedSiteId, siteName]
+      );
+      colonyMapId = newCmId;
+    }
+    const newPlotId = randomUUID();
+    await pool.query(
+      `INSERT INTO map_plots (id, colony_map_id, site_id, plot_number, polygon_points, status, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, '[]'::jsonb, 'AVAILABLE', NOW(), NOW())`,
+      [newPlotId, colonyMapId, resolvedSiteId, normalizedLabel]
+    );
+    const freshRes = await pool.query('SELECT * FROM map_plots WHERE id = $1', [newPlotId]);
+    plot = freshRes.rows[0];
+  }
+
+  if (plot.status !== 'AVAILABLE') {
+    return res.status(400).json({ success: false, message: `Plot is ${plot.status} and cannot be booked` });
+  }
+
+  // Upload screenshots
+  let screenshotUrls = [];
+  if (req.files && req.files.length > 0) {
+    const results = await uploadMany(req.files, 's3');
+    screenshotUrls = results.map(r => r.secure_url);
+  }
+
+  const dbClient = await pool.connect();
+  try {
+    await dbClient.query('BEGIN');
+
+    const parsedBookingAmount = parseFloat(booking_amount);
+
+    // Resolve referring agent
+    let referredById = null;
+    if (ref_sponsor_code) {
+      const refAgent = await dbClient.query(
+        'SELECT id FROM users WHERE UPPER(sponsor_code) = UPPER($1) AND is_active = true',
+        [ref_sponsor_code]
+      );
+      if (refAgent.rows.length > 0) referredById = refAgent.rows[0].id;
+    }
+
+    const bookingId = randomUUID();
+    const booking = await plotBookingModel.create({
+      id: bookingId,
+      site_id: resolvedSiteId,
+      plot_id: plot.id,
+      colony_map_id: plot.colony_map_id,
+      client_name,
+      client_phone,
+      client_email: client_email || null,
+      client_address: client_address || null,
+      booking_date: new Date().toISOString().slice(0, 10),
+      booking_amount: parsedBookingAmount,
+      total_amount: parsedBookingAmount,
+      payment_type: 'ONE_TIME',
+      installment_count: 1,
+      installment_frequency: 'MONTHLY',
+      referred_by: referredById,
+      status: 'PENDING_APPROVAL',
+      booking_source: 'PUBLIC',
+      screenshot_urls: JSON.stringify(screenshotUrls),
+      notes: remarks || `Public booking from website map${ref_sponsor_code ? ` (ref: ${ref_sponsor_code})` : ''}`,
+    }, dbClient);
+
+    // Update plot to RESERVED
+    await dbClient.query(
+      `UPDATE map_plots SET status = 'RESERVED', owner_name = $1, owner_phone = $2,
+       booking_date = CURRENT_DATE, booking_amount = $3,
+       referred_by = $4, updated_at = NOW() WHERE id = $5`,
+      [client_name, client_phone, parsedBookingAmount, referredById, plot.id]
+    );
+
+    // Create payment record
+    await paymentModel.create({
+      site_id: resolvedSiteId,
+      booking_id: booking.id,
+      plot_id: plot.id,
+      amount: parsedBookingAmount,
+      payment_date: new Date().toISOString().slice(0, 10),
+      payment_method: payment_method || 'UPI',
+      payment_type: 'BOOKING',
+      installment_number: 0,
+      status: 'PENDING',
+      transaction_id: transaction_id || null,
+      screenshot_urls: JSON.stringify(screenshotUrls),
+      notes: 'Public booking payment (pending approval)',
+    }, dbClient);
+
+    await dbClient.query('COMMIT');
+
+    bustCache('cache:*:/api/colony-maps*');
+    bustCache('cache:*:/api/bookings*');
+
+    res.status(201).json({ success: true, booking, message: 'Booking submitted! Admin will verify and confirm.' });
+  } catch (err) {
+    await dbClient.query('ROLLBACK');
+    throw err;
+  } finally {
+    dbClient.release();
+  }
+});
+
+// ============================================================
 // PUBLIC BOOKING (no auth — from share link)
 // ============================================================
 export const publicBookPlot = asyncHandler(async (req, res) => {

@@ -332,6 +332,60 @@ export const getPublicMap = async (req, res) => {
     }
 };
 
+// ─── Public: Get ALL plots for a site (for website booking map) ─────
+export const getPublicSitePlots = async (req, res) => {
+    try {
+        let { siteId } = req.params;
+
+        // If siteId is not a valid UUID, treat it as a numeric index (1-based)
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (!uuidRegex.test(siteId)) {
+            const idx = parseInt(siteId, 10);
+            if (isNaN(idx) || idx < 1) {
+                return res.status(400).json({ success: false, message: 'Invalid site identifier' });
+            }
+            const siteRes = await pool.query(
+                `SELECT id FROM sites ORDER BY created_at ASC LIMIT 1 OFFSET $1`,
+                [idx - 1]
+            );
+            if (siteRes.rows.length === 0) {
+                return res.status(404).json({ success: false, message: 'Site not found' });
+            }
+            siteId = siteRes.rows[0].id;
+        }
+
+        const plotsRes = await pool.query(
+            `SELECT mp.id, mp.plot_number, mp.status, mp.area_sqft, mp.dimensions,
+                    mp.facing, mp.total_price, mp.price_per_sqft, mp.block, mp.plot_type,
+                    mp.colony_map_id
+             FROM map_plots mp
+             JOIN colony_maps cm ON mp.colony_map_id = cm.id
+             WHERE cm.site_id = $1`,
+            [siteId]
+        );
+
+        let financialSettings = null;
+        const fs = await financialSettingsModel.findBySite(siteId, pool);
+        if (fs) {
+            financialSettings = {
+                bank_name: fs.bank_name,
+                account_holder_name: fs.account_holder_name,
+                account_number: fs.account_number,
+                ifsc_code: fs.ifsc_code,
+                bank_branch: fs.bank_branch,
+                upi_id: fs.upi_id,
+                upi_scanner_url: fs.upi_scanner_url,
+                payment_instructions: fs.payment_instructions,
+            };
+        }
+
+        res.json({ success: true, plots: plotsRes.rows, financialSettings });
+    } catch (err) {
+        console.error('getPublicSitePlots error:', err);
+        res.status(500).json({ success: false, message: 'Failed to fetch site plots' });
+    }
+};
+
 export const getPublicPlot = async (req, res) => {
     try {
         // Find plot by ID (no auth required for this shared view)

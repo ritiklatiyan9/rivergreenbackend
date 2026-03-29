@@ -190,7 +190,7 @@ export const getTeamPerformance = asyncHandler(async (req, res) => {
     SELECT
       t.id,
       t.name as team_name,
-      (SELECT name FROM users WHERE id = t.team_head_id) as team_head_name,
+      (SELECT string_agg(u2.name, ', ') FROM team_heads th2 JOIN users u2 ON th2.user_id = u2.id WHERE th2.team_id = t.id) as team_head_name,
       COUNT(DISTINCT u.id) as member_count,
       COUNT(DISTINCT l.id) as assigned_leads,
       COUNT(DISTINCT pb.id) as total_bookings,
@@ -200,7 +200,7 @@ export const getTeamPerformance = asyncHandler(async (req, res) => {
     LEFT JOIN leads l ON l.assigned_to = u.id
     LEFT JOIN plot_bookings pb ON pb.booked_by = u.id
     WHERE t.site_id = $1
-    GROUP BY t.id, t.name, t.team_head_id
+    GROUP BY t.id, t.name
     ORDER BY completed_bookings DESC
   `;
 

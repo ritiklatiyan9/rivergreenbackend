@@ -5,16 +5,18 @@ class TeamModel extends MasterModel {
     super('teams');
   }
 
-  // List teams for a site with head info and member count
+  // List teams for a site with head info (multiple heads) and member count
   async findBySiteWithDetails(siteId, pool) {
     const query = `
       SELECT t.*,
-        u.name as head_name,
-        u.email as head_email,
+        COALESCE(
+          (SELECT json_agg(json_build_object('id', u.id, 'name', u.name, 'email', u.email) ORDER BY th.created_at)
+           FROM team_heads th JOIN users u ON th.user_id = u.id
+           WHERE th.team_id = t.id), '[]'::json
+        ) as heads,
         (SELECT COUNT(*) FROM users m WHERE m.team_id = t.id) as member_count,
         COALESCE((SELECT SUM(pb.total_amount) FROM plot_bookings pb JOIN users ub ON pb.booked_by = ub.id WHERE ub.team_id = t.id AND pb.status IN ('ACTIVE','COMPLETED')), 0) as total_revenue
       FROM ${this.tableName} t
-      LEFT JOIN users u ON t.head_id = u.id
       WHERE t.site_id = $1
       ORDER BY t.created_at DESC
     `;
@@ -74,6 +76,56 @@ class TeamModel extends MasterModel {
     `;
     const result = await pool.query(query, [teamId]);
     return result.rows;
+  }
+
+  // Add a head to a team (junction table)
+  async addHead(teamId, userId, pool) {
+    const query = `
+      INSERT INTO team_heads (team_id, user_id)
+      VALUES ($1, $2)
+      ON CONFLICT (team_id, user_id) DO NOTHING
+      RETURNING *
+    `;
+    const result = await pool.query(query, [teamId, userId]);
+    return result.rows[0];
+  }
+
+  // Remove a head from a team
+  async removeHead(teamId, userId, pool) {
+    const query = `DELETE FROM team_heads WHERE team_id = $1 AND user_id = $2 RETURNING *`;
+    const result = await pool.query(query, [teamId, userId]);
+    return result.rows[0];
+  }
+
+  // Get all heads of a team
+  async getHeads(teamId, pool) {
+    const query = `
+      SELECT u.id, u.name, u.email, u.role
+      FROM team_heads th
+      JOIN users u ON th.user_id = u.id
+      WHERE th.team_id = $1
+      ORDER BY th.created_at
+    `;
+    const result = await pool.query(query, [teamId]);
+    return result.rows;
+  }
+
+  // Check if a user is head of a team
+  async isHead(teamId, userId, pool) {
+    const result = await pool.query(
+      'SELECT 1 FROM team_heads WHERE team_id = $1 AND user_id = $2',
+      [teamId, userId]
+    );
+    return result.rows.length > 0;
+  }
+
+  // Get head IDs for a team
+  async getHeadIds(teamId, pool) {
+    const result = await pool.query(
+      'SELECT user_id FROM team_heads WHERE team_id = $1',
+      [teamId]
+    );
+    return result.rows.map(r => r.user_id);
   }
 }
 

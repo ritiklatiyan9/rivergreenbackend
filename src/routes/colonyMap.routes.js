@@ -18,6 +18,7 @@ import {
     getMapStats,
     getPublicPlot,
     getPublicMap,
+    getPublicSitePlots,
     initializeLayout,
     uploadMapImage,
 } from '../controllers/colonyMap.controller.js';
@@ -27,6 +28,7 @@ import checkRole from '../middlewares/role.middleware.js';
 // Public Routes (for sharing — no auth)
 router.get('/public/plots/:plotId', getPublicPlot);
 router.get('/public/maps/:mapId', getPublicMap);
+router.get('/public/site-plots/:siteId', getPublicSitePlots);
 
 // Read-only routes accessible by AGENT, TEAM_HEAD, ADMIN
 router.use(authMiddleware);

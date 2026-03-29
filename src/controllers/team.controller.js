@@ -62,7 +62,8 @@ export const getTeam = asyncHandler(async (req, res) => {
   }
 
   const members = await teamModel.getMembers(id, pool);
-  res.json({ success: true, team, members });
+  const heads = await teamModel.getHeads(id, pool);
+  res.json({ success: true, team: { ...team, heads }, members });
 });
 
 // Update Team
@@ -107,7 +108,17 @@ export const deleteTeam = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: 'Team not found' });
   }
 
-  // Unassign all users from this team
+  // Unassign all users from this team and revert heads' roles
+  const heads = await teamModel.getHeads(id, pool);
+  for (const head of heads) {
+    const otherTeamHeads = await pool.query(
+      'SELECT 1 FROM team_heads WHERE user_id = $1 AND team_id != $2 LIMIT 1',
+      [head.id, id]
+    );
+    if (otherTeamHeads.rows.length === 0 && head.role === 'TEAM_HEAD') {
+      await userModel.update(head.id, { role: 'AGENT' }, pool);
+    }
+  }
   await pool.query('UPDATE users SET team_id = NULL WHERE team_id = $1', [id]);
   await teamModel.delete(id, pool);
   bustCache('cache:*:/api/teams*');
@@ -144,23 +155,31 @@ export const assignTeamHead = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'User does not belong to your site' });
   }
 
-  // If team already has a different head, admin must remove them first
-  if (team.head_id && String(team.head_id) !== String(user_id)) {
-    const oldHead = await userModel.findById(team.head_id, pool);
+  // Check if user is already a head of this team
+  const alreadyHead = await teamModel.isHead(id, user_id, pool);
+  if (alreadyHead) {
     return res.status(409).json({
       success: false,
-      message: `This team already has a head (${oldHead?.name || 'Unknown'}). Please remove the current head before assigning a new one.`,
-      current_head: oldHead ? { id: oldHead.id, name: oldHead.name, email: oldHead.email } : null,
+      message: `${targetUser.name} is already a head of this team.`,
     });
   }
 
-  // Update team head, assign team to user, and promote role to TEAM_HEAD
-  const updated = await teamModel.update(id, { head_id: user_id }, pool);
+  // Add head to team_heads junction table
+  await teamModel.addHead(id, user_id, pool);
+
+  // Update team.head_id to keep backward compat (set to first head if null)
+  if (!team.head_id) {
+    await teamModel.update(id, { head_id: user_id }, pool);
+  }
+
+  // Assign team and promote role to TEAM_HEAD
   await userModel.update(user_id, { team_id: id, role: 'TEAM_HEAD' }, pool);
+
+  const heads = await teamModel.getHeads(id, pool);
 
   bustCache('cache:*:/api/teams*');
   bustCache('cache:*:/api/site/users*');
-  res.json({ success: true, team: updated });
+  res.json({ success: true, team: { ...team, heads } });
 });
 
 // ============================================================
@@ -169,6 +188,7 @@ export const assignTeamHead = asyncHandler(async (req, res) => {
 
 export const removeTeamHead = asyncHandler(async (req, res) => {
   const { id } = req.params;
+  const { user_id } = req.query || {};
 
   const adminUser = await userModel.findById(req.user.id, pool);
   if (!adminUser || !adminUser.site_id) {
@@ -180,24 +200,68 @@ export const removeTeamHead = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: 'Team not found' });
   }
 
-  if (!team.head_id) {
+  const currentHeads = await teamModel.getHeads(id, pool);
+  if (currentHeads.length === 0) {
     return res.status(400).json({ success: false, message: 'This team has no head assigned.' });
   }
 
-  const oldHead = await userModel.findById(team.head_id, pool);
-  if (oldHead && oldHead.role === 'TEAM_HEAD') {
-    await userModel.update(team.head_id, { role: 'AGENT' }, pool);
+  // If user_id provided, remove that specific head; otherwise remove all heads
+  if (user_id) {
+    const isHead = currentHeads.some(h => String(h.id) === String(user_id));
+    if (!isHead) {
+      return res.status(400).json({ success: false, message: 'This user is not a head of this team.' });
+    }
+
+    const oldHead = await userModel.findById(user_id, pool);
+    // Remove from junction table
+    await teamModel.removeHead(id, user_id, pool);
+    // Revert role to AGENT
+    if (oldHead && oldHead.role === 'TEAM_HEAD') {
+      // Check if user is still head of any other team
+      const otherTeamHeads = await pool.query(
+        'SELECT 1 FROM team_heads WHERE user_id = $1 AND team_id != $2 LIMIT 1',
+        [user_id, id]
+      );
+      if (otherTeamHeads.rows.length === 0) {
+        await userModel.update(user_id, { role: 'AGENT' }, pool);
+      }
+    }
+
+    // Update team.head_id for backward compat
+    const remainingHeads = await teamModel.getHeadIds(id, pool);
+    await teamModel.update(id, { head_id: remainingHeads[0] || null }, pool);
+
+    bustCache('cache:*:/api/teams*');
+    bustCache('cache:*:/api/site/users*');
+    res.json({
+      success: true,
+      message: `${oldHead?.name || 'Head'} removed as team head. Role reverted to Agent.`,
+      team: { ...team, heads: await teamModel.getHeads(id, pool) },
+    });
+  } else {
+    // Remove all heads (backward compat with old endpoint)
+    for (const head of currentHeads) {
+      await teamModel.removeHead(id, head.id, pool);
+      if (head.role === 'TEAM_HEAD') {
+        const otherTeamHeads = await pool.query(
+          'SELECT 1 FROM team_heads WHERE user_id = $1 AND team_id != $2 LIMIT 1',
+          [head.id, id]
+        );
+        if (otherTeamHeads.rows.length === 0) {
+          await userModel.update(head.id, { role: 'AGENT' }, pool);
+        }
+      }
+    }
+    await teamModel.update(id, { head_id: null }, pool);
+
+    bustCache('cache:*:/api/teams*');
+    bustCache('cache:*:/api/site/users*');
+    res.json({
+      success: true,
+      message: 'All team heads removed.',
+      team: { ...team, heads: [] },
+    });
   }
-
-  const updated = await teamModel.update(id, { head_id: null }, pool);
-
-  bustCache('cache:*:/api/teams*');
-  bustCache('cache:*:/api/site/users*');
-  res.json({
-    success: true,
-    message: `${oldHead?.name || 'Head'} removed as team head. Role reverted to Agent.`,
-    team: updated,
-  });
 });
 
 // ============================================================
@@ -300,7 +364,7 @@ export const registerTeamAgent = asyncHandler(async (req, res) => {
 
   const isAdmin = ['ADMIN', 'OWNER'].includes(actor.role);
   const isOwnTeamHead = actor.role === 'TEAM_HEAD' && (
-    String(team.head_id || '') === String(actor.id) || String(actor.team_id || '') === String(team.id)
+    await teamModel.isHead(id, actor.id, pool) || String(actor.team_id || '') === String(team.id)
   );
   if (!isAdmin && !isOwnTeamHead) {
     return res.status(403).json({ success: false, message: 'Only this team head can register agents for this team' });
@@ -314,7 +378,8 @@ export const registerTeamAgent = asyncHandler(async (req, res) => {
   const sponsorCode = await userModel.getUniqueSponsorCode(pool);
   const hashedPassword = await hashPassword(password);
 
-  const sponsorId = team.head_id || actor.id;
+  const headIds = await teamModel.getHeadIds(id, pool);
+  const sponsorId = headIds[0] || actor.id;
   const newUser = await userModel.create({
     name,
     email,
@@ -356,9 +421,9 @@ export const getTeamMembersPerformance = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: 'Team not found' });
   }
 
-  // Permission check: allow ADMIN/OWNER, or team head for their own team (by head_id)
+  // Permission check: allow ADMIN/OWNER, or team head for their own team (by team_heads table)
   const isAdmin = ['ADMIN', 'OWNER'].includes(user.role);
-  const isTeamHead = String(team.head_id) === String(user.id); // uses head_id, not role
+  const isTeamHead = await teamModel.isHead(id, user.id, pool);
   const isOwnTeamAgent = String(user.team_id) === String(id) && user.role === 'AGENT';
   
   if (!isAdmin && !isTeamHead && !isOwnTeamAgent) {
@@ -480,6 +545,7 @@ export const getTeamMembersPerformance = asyncHandler(async (req, res) => {
     team_name: team.name,
     team_id: team.id,
     head_id: team.head_id,
+    heads: await teamModel.getHeads(id, pool),
     members: membersResult.rows,
     dailyTrend: trendResult.rows,
     pipeline: pipelineResult.rows,
@@ -502,8 +568,11 @@ export const getAllTeamsPerformance = asyncHandler(async (req, res) => {
       t.name,
       t.head_id,
       t.created_at,
-      h.name as head_name,
-      h.email as head_email,
+      COALESCE(
+        (SELECT json_agg(json_build_object('id', hu.id, 'name', hu.name, 'email', hu.email) ORDER BY th.created_at)
+         FROM team_heads th JOIN users hu ON th.user_id = hu.id
+         WHERE th.team_id = t.id), '[]'::json
+      ) as heads,
       COALESCE(ms.member_count, 0)::int as member_count,
       COALESCE(ls.total_leads, 0)::int as total_leads,
       COALESCE(ls.new_leads, 0)::int as new_leads,
@@ -521,7 +590,6 @@ export const getAllTeamsPerformance = asyncHandler(async (req, res) => {
         ELSE 0
       END as conversion_rate
     FROM teams t
-    LEFT JOIN users h ON t.head_id = h.id
     LEFT JOIN LATERAL (
       SELECT COUNT(*) as member_count FROM users WHERE team_id = t.id
     ) ms ON true
@@ -592,7 +660,7 @@ export const getTeamPerformance = asyncHandler(async (req, res) => {
 
   // Permission check: allow ADMIN/OWNER or team head for their own team
   const isAdmin = ['ADMIN', 'OWNER'].includes(adminUser.role);
-  const isTeamHead = String(team.head_id) === String(adminUser.id);
+  const isTeamHead = await teamModel.isHead(id, adminUser.id, pool);
   
   if (!isAdmin && !isTeamHead) {
     return res.status(403).json({ success: false, message: 'Access denied.' });
@@ -654,7 +722,7 @@ export const getTeamTargets = asyncHandler(async (req, res) => {
 
   // Permission check: allow ADMIN/OWNER or team head for their own team
   const isAdmin = ['ADMIN', 'OWNER'].includes(adminUser.role);
-  const isTeamHead = String(team.head_id) === String(adminUser.id);
+  const isTeamHead = await teamModel.isHead(id, adminUser.id, pool);
   
   if (!isAdmin && !isTeamHead) {
     return res.status(403).json({ success: false, message: 'Access denied.' });

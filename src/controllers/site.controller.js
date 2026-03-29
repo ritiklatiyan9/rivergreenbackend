@@ -205,6 +205,11 @@ export const createSiteUser = asyncHandler(async (req, res) => {
 
   if (role === 'TEAM_HEAD' && resolvedTeamId) {
     await teamModel.update(resolvedTeamId, { head_id: newUser.id }, pool);
+    // Also insert into team_heads junction table
+    await pool.query(
+      'INSERT INTO team_heads (team_id, user_id) VALUES ($1, $2) ON CONFLICT (team_id, user_id) DO NOTHING',
+      [resolvedTeamId, newUser.id]
+    );
   }
 
   // Save extended profile data if provided
