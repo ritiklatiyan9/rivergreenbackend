@@ -29,6 +29,7 @@ export const updateFinancialSettings = asyncHandler(async (req, res) => {
   const {
     bank_name, account_holder_name, account_number, ifsc_code, bank_branch,
     upi_id, payment_instructions,
+    razorpay_key_id, razorpay_key_secret, default_booking_amount,
   } = req.body;
 
   // Handle UPI Scanner image upload
@@ -47,6 +48,9 @@ export const updateFinancialSettings = asyncHandler(async (req, res) => {
     upi_id: upi_id || null,
     upi_scanner_url: upi_scanner_url || null,
     payment_instructions: payment_instructions || null,
+    razorpay_key_id: razorpay_key_id || null,
+    razorpay_key_secret: razorpay_key_secret || null,
+    default_booking_amount: default_booking_amount ? parseFloat(default_booking_amount) : 0,
     updated_by: req.user.id,
     created_by: req.user.id,
   };
@@ -82,6 +86,7 @@ export const getPublicFinancialSettings = asyncHandler(async (req, res) => {
       upi_id: settings.upi_id,
       upi_scanner_url: settings.upi_scanner_url,
       payment_instructions: settings.payment_instructions,
+      default_booking_amount: parseFloat(settings.default_booking_amount) || 0,
     },
   });
 });

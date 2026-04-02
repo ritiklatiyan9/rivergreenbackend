@@ -13,6 +13,8 @@ import {
   getPendingApprovals,
   publicBookPlot,
   publicBookByLabel,
+  getPublicBookingStatus,
+  publicUploadScreenshots,
 } from '../controllers/plotBooking.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import checkRole from '../middlewares/role.middleware.js';
@@ -22,6 +24,8 @@ import { cacheMiddleware } from '../middlewares/cache.middleware.js';
 // ── PUBLIC routes (no auth) ─────────────────────────────
 router.post('/public-book/:plotId', upload.array('screenshots', 5), publicBookPlot);
 router.post('/public-book-by-label', upload.array('screenshots', 5), publicBookByLabel);
+router.get('/track/:id', getPublicBookingStatus);
+router.post('/track/:id/screenshots', upload.array('screenshots', 5), publicUploadScreenshots);
 
 // All other booking routes require auth
 router.use(authMiddleware);

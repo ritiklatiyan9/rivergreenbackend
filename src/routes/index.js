@@ -22,6 +22,7 @@ import chatRoutes from './chat.routes.js';
 import financialSettingsRoutes from './financialSettings.routes.js';
 import contactRoutes from './contact.routes.js';
 import directionsRoutes from './directions.routes.js';
+import razorpayRoutes from './razorpay.routes.js';
 
 router.use('/auth', authRoutes);
 router.use('/upload', uploadRoutes);
@@ -44,5 +45,6 @@ router.use('/chat', chatRoutes);
 router.use('/financial-settings', financialSettingsRoutes);
 router.use('/contacts', contactRoutes);
 router.use('/directions', directionsRoutes);
+router.use('/razorpay', razorpayRoutes);
 
 export default router;

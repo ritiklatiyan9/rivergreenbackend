@@ -551,6 +551,7 @@ export const publicBookByLabel = asyncHandler(async (req, res) => {
     client_name, client_phone, client_email, client_address,
     booking_amount, payment_method, transaction_id,
     ref_sponsor_code, remarks,
+    razorpay_payment_id, razorpay_order_id,
   } = req.body;
 
   if (!plot_label || !site_id) {
@@ -676,7 +677,7 @@ export const publicBookByLabel = asyncHandler(async (req, res) => {
       status: 'PENDING_APPROVAL',
       booking_source: 'PUBLIC',
       screenshot_urls: JSON.stringify(screenshotUrls),
-      notes: remarks || `Public booking from website map${ref_sponsor_code ? ` (ref: ${ref_sponsor_code})` : ''}`,
+      notes: remarks || `Public booking from website map${ref_sponsor_code ? ` (ref: ${ref_sponsor_code})` : ''}${razorpay_payment_id ? ` [Razorpay: ${razorpay_payment_id}]` : ''}`,
     }, dbClient);
 
     // Update plot to RESERVED
@@ -688,19 +689,20 @@ export const publicBookByLabel = asyncHandler(async (req, res) => {
     );
 
     // Create payment record
+    const isRazorpayPaid = !!razorpay_payment_id;
     await paymentModel.create({
       site_id: resolvedSiteId,
       booking_id: booking.id,
       plot_id: plot.id,
       amount: parsedBookingAmount,
       payment_date: new Date().toISOString().slice(0, 10),
-      payment_method: payment_method || 'UPI',
+      payment_method: payment_method || 'RAZORPAY',
       payment_type: 'BOOKING',
       installment_number: 0,
-      status: 'PENDING',
-      transaction_id: transaction_id || null,
+      status: isRazorpayPaid ? 'COMPLETED' : 'PENDING',
+      transaction_id: transaction_id || razorpay_payment_id || null,
       screenshot_urls: JSON.stringify(screenshotUrls),
-      notes: 'Public booking payment (pending approval)',
+      notes: razorpay_payment_id ? `Razorpay payment: ${razorpay_payment_id} (Order: ${razorpay_order_id || 'N/A'})` : 'Public booking payment (pending approval)',
     }, dbClient);
 
     await dbClient.query('COMMIT');
@@ -728,6 +730,7 @@ export const publicBookPlot = asyncHandler(async (req, res) => {
     installment_count, installment_frequency,
     payment_method, transaction_id, upi_id,
     ref_sponsor_code, remarks,
+    razorpay_payment_id, razorpay_order_id,
   } = req.body;
 
   if (!client_name || !client_phone) {
@@ -806,21 +809,22 @@ export const publicBookPlot = asyncHandler(async (req, res) => {
       [client_name, client_phone, parsedBookingAmount, referredById, plotId]
     );
 
-    // Create initial booking payment record (PENDING until approved)
+    // Create initial booking payment record
+    const isRazorpayPaid = !!razorpay_payment_id;
     await paymentModel.create({
       site_id: plot.site_id,
       booking_id: booking.id,
       plot_id: plotId,
       amount: parsedBookingAmount,
       payment_date: new Date().toISOString().slice(0, 10),
-      payment_method: payment_method || 'UPI',
+      payment_method: payment_method || 'RAZORPAY',
       payment_type: 'BOOKING',
       installment_number: 0,
-      status: 'PENDING',
-      transaction_id: transaction_id || null,
+      status: isRazorpayPaid ? 'COMPLETED' : 'PENDING',
+      transaction_id: transaction_id || razorpay_payment_id || null,
       upi_id: upi_id || null,
       screenshot_urls: JSON.stringify(screenshotUrls),
-      notes: 'Public booking payment (pending approval)',
+      notes: razorpay_payment_id ? `Razorpay payment: ${razorpay_payment_id} (Order: ${razorpay_order_id || 'N/A'})` : 'Public booking payment (pending approval)',
     }, dbClient);
 
     await dbClient.query('COMMIT');
@@ -849,4 +853,96 @@ export const getBookingStats = asyncHandler(async (req, res) => {
 
   const stats = await plotBookingModel.getStats(siteId, pool, bookedBy);
   res.json({ success: true, stats });
+});
+
+// ============================================================
+// PUBLIC BOOKING TRACKING (no auth — customer tracking page)
+// ============================================================
+export const getPublicBookingStatus = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  const query = `
+    SELECT pb.id, pb.status, pb.booking_date, pb.booking_amount, pb.total_amount,
+      pb.client_name, pb.client_phone, pb.payment_type, pb.screenshot_urls,
+      pb.created_at,
+      mp.plot_number, mp.block, mp.area_sqft, mp.dimensions, mp.facing, mp.plot_type,
+      cm.name as colony_name,
+      COALESCE(
+        (SELECT SUM(amount) FROM payments p WHERE p.booking_id = pb.id AND p.status = 'COMPLETED'), 0
+      ) as total_paid,
+      (SELECT transaction_id FROM payments WHERE booking_id = pb.id AND payment_type = 'BOOKING' LIMIT 1) as razorpay_payment_id,
+      (SELECT payment_date FROM payments WHERE booking_id = pb.id AND payment_type = 'BOOKING' LIMIT 1) as payment_date
+    FROM plot_bookings pb
+    LEFT JOIN map_plots mp ON pb.plot_id = mp.id
+    LEFT JOIN colony_maps cm ON pb.colony_map_id = cm.id
+    WHERE pb.id = $1
+  `;
+  const result = await pool.query(query, [id]);
+  if (!result.rows[0]) {
+    return res.status(404).json({ success: false, message: 'Booking not found' });
+  }
+
+  const booking = result.rows[0];
+  // Only expose safe public fields
+  res.json({
+    success: true,
+    booking: {
+      id: booking.id,
+      status: booking.status,
+      booking_date: booking.booking_date,
+      booking_amount: parseFloat(booking.booking_amount || 0),
+      total_amount: parseFloat(booking.total_amount || 0),
+      total_paid: parseFloat(booking.total_paid || 0),
+      client_name: booking.client_name,
+      client_phone: booking.client_phone?.replace(/(\d{2})\d{5}(\d{3})/, '$1*****$2'),
+      payment_type: booking.payment_type,
+      plot_number: booking.plot_number,
+      block: booking.block,
+      area_sqft: booking.area_sqft,
+      dimensions: booking.dimensions,
+      facing: booking.facing,
+      plot_type: booking.plot_type,
+      colony_name: booking.colony_name,
+      razorpay_payment_id: booking.razorpay_payment_id,
+      payment_date: booking.payment_date,
+      screenshot_urls: booking.screenshot_urls,
+      created_at: booking.created_at,
+    },
+  });
+});
+
+// ============================================================
+// PUBLIC SCREENSHOT UPLOAD (customer adds proof)
+// ============================================================
+export const publicUploadScreenshots = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  const booking = await plotBookingModel.findById(id, pool);
+  if (!booking) {
+    return res.status(404).json({ success: false, message: 'Booking not found' });
+  }
+
+  if (!req.files || req.files.length === 0) {
+    return res.status(400).json({ success: false, message: 'No files uploaded' });
+  }
+
+  const results = await uploadMany(req.files, 's3');
+  const newUrls = results.map(r => r.secure_url);
+
+  // Merge with existing screenshots
+  let existing = [];
+  try {
+    existing = typeof booking.screenshot_urls === 'string' ? JSON.parse(booking.screenshot_urls) : (booking.screenshot_urls || []);
+    if (!Array.isArray(existing)) existing = [];
+  } catch { existing = []; }
+
+  const merged = [...existing, ...newUrls].slice(0, 10); // max 10
+
+  await plotBookingModel.update(id, {
+    screenshot_urls: JSON.stringify(merged),
+  }, pool);
+
+  bustCache('cache:*:/api/bookings*');
+
+  res.json({ success: true, screenshot_urls: merged, message: 'Screenshots uploaded successfully' });
 });
