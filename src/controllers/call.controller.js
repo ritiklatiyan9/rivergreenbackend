@@ -765,3 +765,54 @@ export const getAdvancedAnalytics = asyncHandler(async (req, res) => {
 
     res.json({ success: true, ...analytics });
 });
+
+// ============================================================
+// DIALER HISTORY — cursor-paginated call log for dialer page
+// ============================================================
+export const getDialerHistory = asyncHandler(async (req, res) => {
+    const dbUser = await userModel.findById(req.user.id, pool);
+    if (!dbUser || !dbUser.site_id) {
+        return res.status(404).json({ success: false, message: 'No site assigned' });
+    }
+
+    const { cursor, limit, call_type } = req.query;
+    const parsedLimit = Math.min(Math.max(parseInt(limit) || 30, 5), 100);
+
+    const result = await callModel.getDialerHistory({
+        siteId: dbUser.site_id,
+        assignedTo: req.user.id,
+        cursor: cursor || null,
+        limit: parsedLimit,
+        callType: call_type,
+    }, pool);
+
+    res.json({ success: true, ...result });
+});
+
+// ============================================================
+// DIALER SEARCH — search leads/contacts by name or phone
+// ============================================================
+export const searchDialerContacts = asyncHandler(async (req, res) => {
+    const dbUser = await userModel.findById(req.user.id, pool);
+    if (!dbUser || !dbUser.site_id) {
+        return res.status(404).json({ success: false, message: 'No site assigned' });
+    }
+
+    const { q, limit } = req.query;
+    if (!q || String(q).trim().length < 2) {
+        return res.json({ success: true, results: [] });
+    }
+
+    const scope = getScopeFilters(req.user, dbUser);
+    const parsedLimit = Math.min(Math.max(parseInt(limit) || 20, 5), 50);
+
+    const result = await callModel.searchForDialer({
+        siteId: dbUser.site_id,
+        assignedTo: scope.assignedTo,
+        teamId: scope.teamId,
+        query: q,
+        limit: parsedLimit,
+    }, pool);
+
+    res.json({ success: true, ...result });
+});

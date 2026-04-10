@@ -9,7 +9,7 @@ const authMiddleware = async (req, res, next) => {
   try {
     const decoded = verifyToken(token);
     const result = await pool.query(
-      'SELECT id, email, role, site_id, is_active, token_version FROM users WHERE id = $1 LIMIT 1',
+      'SELECT id, email, role, site_id, team_id, is_active, token_version FROM users WHERE id = $1 LIMIT 1',
       [decoded.id],
     );
     const dbUser = result.rows[0];
@@ -52,6 +52,7 @@ const authMiddleware = async (req, res, next) => {
       email: dbUser.email,
       role: dbUser.role,
       site_id: effectiveSiteId,
+      team_id: dbUser.team_id || null,
     };
     next();
   } catch (err) {

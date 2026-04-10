@@ -7,6 +7,7 @@ import {
     getScheduledFollowups,
     getMissedFollowups,
     getFollowupCounts,
+    getReminders,
     updateFollowup,
     snoozeFollowup,
     escalateFollowup,
@@ -20,6 +21,9 @@ router.use(authMiddleware);
 
 // Dashboard counts
 router.get('/counts', cacheMiddleware(60), getFollowupCounts);
+
+// Reminders — unified view
+router.get('/reminders', cacheMiddleware(45), getReminders);
 
 // Scheduled & Missed
 router.get('/scheduled', cacheMiddleware(60), getScheduledFollowups);

@@ -18,6 +18,8 @@ import {
     endCallSession,
     getAgentCallDetails,
     getAdvancedAnalytics,
+    getDialerHistory,
+    searchDialerContacts,
 } from '../controllers/call.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import checkRole from '../middlewares/role.middleware.js';
@@ -32,6 +34,12 @@ router.get('/outcomes', cacheMiddleware(600), getCallOutcomes);
 // Leads Dialer — live list of leads; short TTL
 router.get('/leads-dialer', cacheMiddleware(60), getLeadsForDialer);
 router.get('/shift-to-call', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(15), getShiftToCallQueue);
+
+// Dialer History — cursor-paginated call log
+router.get('/dialer-history', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN']), cacheMiddleware(15), getDialerHistory);
+
+// Dialer Search — search leads/contacts by name or phone
+router.get('/dialer-search', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN']), searchDialerContacts);
 
 // Analytics
 router.get('/analytics', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getCallAnalytics);

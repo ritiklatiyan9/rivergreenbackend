@@ -19,6 +19,7 @@ const getSiteId = async (userId) => {
 const bustLeadCache = () => {
     bustCache('cache:*:/api/leads*');
     bustCache('cache:*:/api/site/leads*');
+    bustCache('cache:*:/api/followups*');
 };
 
 // ============================================================
@@ -216,6 +217,21 @@ export const updateLead = asyncHandler(async (req, res) => {
     }
 
     const updatedLead = await leadModel.update(id, updateData, pool);
+
+    // Sync name/phone back to the linked contact (if any)
+    if (updateData.name || updateData.phone) {
+        const contactUpdate = {};
+        if (updateData.name) contactUpdate.name = updateData.name;
+        if (updateData.phone) contactUpdate.phone = updateData.phone;
+        const setCols = Object.keys(contactUpdate).map((k, i) => `${k} = $${i + 1}`).join(', ');
+        const vals = [...Object.values(contactUpdate), id];
+        await pool.query(
+            `UPDATE contacts SET ${setCols}, updated_at = NOW() WHERE converted_lead_id = $${vals.length}`,
+            vals
+        );
+        bustCache('cache:*:/api/contacts*');
+    }
+
     bustLeadCache();
 
     res.json({

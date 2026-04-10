@@ -608,6 +608,89 @@ class CallModel extends MasterModel {
       compliancePercent: needed > 0 ? Math.round((created / needed) * 100) : 100,
     };
   }
+
+  // ── Dialer History: paginated call log for dialer page (cursor-based for perf) ──
+  async getDialerHistory({ siteId, assignedTo, cursor, limit = 30, callType }, pool) {
+    const conditions = ['c.site_id = $1', 'c.assigned_to = $2'];
+    const params = [siteId, assignedTo];
+    let idx = 3;
+
+    if (cursor) {
+      conditions.push(`c.call_start < $${idx++}`);
+      params.push(cursor);
+    }
+    if (callType && callType !== 'ALL') {
+      conditions.push(`c.call_type = $${idx++}`);
+      params.push(callType);
+    }
+
+    const where = conditions.join(' AND ');
+
+    const query = `
+      SELECT c.id, c.call_type, c.call_start, c.duration_seconds, c.call_status,
+             c.call_source, c.phone_number_dialed,
+             l.name as lead_name, l.phone as lead_phone,
+             co.label as outcome_label
+      FROM ${this.tableName} c
+      LEFT JOIN leads l ON c.lead_id = l.id
+      LEFT JOIN call_outcomes co ON c.outcome_id = co.id
+      WHERE ${where}
+      ORDER BY c.call_start DESC
+      LIMIT $${idx}
+    `;
+    params.push(limit + 1); // fetch one extra to detect hasMore
+
+    const result = await pool.query(query, params);
+    const hasMore = result.rows.length > limit;
+    const calls = hasMore ? result.rows.slice(0, limit) : result.rows;
+    const nextCursor = hasMore ? calls[calls.length - 1].call_start : null;
+
+    return { calls, hasMore, nextCursor };
+  }
+
+  // ── Search leads & contacts for dialer ──
+  async searchForDialer({ siteId, assignedTo, teamId, query: searchQuery, limit = 20 }, pool) {
+    const sanitized = String(searchQuery || '').trim();
+    if (!sanitized) return { results: [] };
+
+    const searchPattern = `%${sanitized}%`;
+    const conditions = ['l.site_id = $1'];
+    const params = [siteId];
+    let idx = 2;
+
+    if (assignedTo) {
+      conditions.push(`l.assigned_to = $${idx++}`);
+      params.push(assignedTo);
+    }
+    if (teamId) {
+      conditions.push(`u_agent.team_id = $${idx++}`);
+      params.push(teamId);
+    }
+
+    const where = conditions.join(' AND ');
+    const searchIdx = idx;
+    params.push(searchPattern);
+    idx++;
+    params.push(limit);
+
+    const leadsQuery = `
+      SELECT l.id, l.name, l.phone, l.status, l.lead_category, 'lead' as source,
+             lc.last_call_at, lc.total_calls
+      FROM leads l
+      LEFT JOIN users u_agent ON l.assigned_to = u_agent.id
+      LEFT JOIN LATERAL (
+        SELECT c.call_start as last_call_at, COUNT(*) OVER() as total_calls
+        FROM calls c WHERE c.lead_id = l.id ORDER BY c.call_start DESC LIMIT 1
+      ) lc ON TRUE
+      WHERE ${where}
+        AND (l.name ILIKE $${searchIdx} OR l.phone ILIKE $${searchIdx})
+      ORDER BY lc.last_call_at DESC NULLS LAST, l.created_at DESC
+      LIMIT $${idx - 1}
+    `;
+
+    const result = await pool.query(leadsQuery, params);
+    return { results: result.rows };
+  }
 }
 
 export default new CallModel();

@@ -38,7 +38,7 @@ class FollowupModel extends MasterModel {
         }
         if (dateTo) {
             conditions.push(`f.scheduled_at <= $${idx++}`);
-            params.push(dateTo);
+            params.push(dateTo + 'T23:59:59');
         }
         if (leadCategory && leadCategory !== 'ALL') {
             conditions.push(`l.lead_category = $${idx++}`);
@@ -48,22 +48,14 @@ class FollowupModel extends MasterModel {
         const where = conditions.join(' AND ');
         const offset = (page - 1) * limit;
 
-        const countQuery = `
-      SELECT COUNT(*) as total
-      FROM ${this.tableName} f
-      JOIN users u_agent ON f.assigned_to = u_agent.id
-      LEFT JOIN leads l ON f.lead_id = l.id
-      WHERE ${where}
-    `;
-        const countResult = await pool.query(countQuery, params);
-        const total = parseInt(countResult.rows[0].total);
-
+        // Single query: count + rows via window function (eliminates extra round-trip)
         const query = `
       SELECT f.*,
         l.name as lead_name, l.phone as lead_phone, l.lead_category,
         u_agent.name as agent_name, u_agent.email as agent_email,
         u_esc.name as escalated_to_name,
-        c.call_type
+        c.call_type,
+        COUNT(*) OVER() AS _total_count
       FROM ${this.tableName} f
       LEFT JOIN leads l ON f.lead_id = l.id
       LEFT JOIN users u_agent ON f.assigned_to = u_agent.id
@@ -76,8 +68,11 @@ class FollowupModel extends MasterModel {
         params.push(limit, offset);
         const result = await pool.query(query, params);
 
+        const total = result.rows.length > 0 ? parseInt(result.rows[0]._total_count) : 0;
+        const followups = result.rows.map(({ _total_count, ...row }) => row);
+
         return {
-            followups: result.rows,
+            followups,
             pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
         };
     }
@@ -127,22 +122,14 @@ class FollowupModel extends MasterModel {
         const where = conditions.join(' AND ');
         const offset = (page - 1) * limit;
 
-        const countQuery = `
-      SELECT COUNT(*) as total
-      FROM ${this.tableName} f
-      JOIN users u_agent ON f.assigned_to = u_agent.id
-      LEFT JOIN leads l ON f.lead_id = l.id
-      WHERE ${where}
-    `;
-        const countResult = await pool.query(countQuery, params);
-        const total = parseInt(countResult.rows[0].total);
-
+        // Single query: count + rows via window function
         const query = `
       SELECT f.*,
         l.name as lead_name, l.phone as lead_phone, l.lead_category,
         u_agent.name as agent_name, u_agent.email as agent_email,
         u_esc.name as escalated_to_name,
-        c.call_type
+        c.call_type,
+        COUNT(*) OVER() AS _total_count
       FROM ${this.tableName} f
       LEFT JOIN leads l ON f.lead_id = l.id
       LEFT JOIN users u_agent ON f.assigned_to = u_agent.id
@@ -155,8 +142,11 @@ class FollowupModel extends MasterModel {
         params.push(limit, offset);
         const result = await pool.query(query, params);
 
+        const total = result.rows.length > 0 ? parseInt(result.rows[0]._total_count) : 0;
+        const followups = result.rows.map(({ _total_count, ...row }) => row);
+
         return {
-            followups: result.rows,
+            followups,
             pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
         };
     }

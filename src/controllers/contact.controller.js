@@ -93,6 +93,49 @@ export const getContacts = asyncHandler(async (req, res) => {
 // ============================================================
 // DELETE CONTACT
 // ============================================================
+// ============================================================
+// UPDATE CONTACT — edit name / phone
+// ============================================================
+export const updateContact = asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { name, phone } = req.body;
+
+    if (!name?.trim() || !phone?.trim()) {
+        return res.status(400).json({ success: false, message: 'Name and phone are required' });
+    }
+
+    const contact = await contactModel.findById(id, pool);
+    if (!contact) return res.status(404).json({ success: false, message: 'Contact not found' });
+
+    const role = req.user.role;
+    if ((role === 'AGENT' || role === 'TEAM_HEAD') && contact.created_by !== req.user.id) {
+        return res.status(403).json({ success: false, message: 'You can only edit your own contacts' });
+    }
+
+    // Check duplicate phone on a different contact
+    if (phone.trim() !== contact.phone) {
+        const duplicate = await contactModel.findByPhone(contact.site_id, phone.trim(), pool);
+        if (duplicate && duplicate.id !== id) {
+            return res.status(409).json({ success: false, message: 'A contact with this phone already exists' });
+        }
+    }
+
+    const updated = await contactModel.update(id, { name: name.trim(), phone: phone.trim() }, pool);
+
+    // Sync name/phone to the linked lead (if contact was converted)
+    if (contact.converted_lead_id) {
+        await pool.query(
+            `UPDATE leads SET name = $1, phone = $2, updated_at = NOW() WHERE id = $3`,
+            [name.trim(), phone.trim(), contact.converted_lead_id]
+        );
+        bustCache('cache:*:/api/followups*');
+        bustCache('cache:*:/api/leads*');
+    }
+
+    bustContactCache();
+    res.json({ success: true, contact: updated });
+});
+
 export const deleteContact = asyncHandler(async (req, res) => {
     const { id } = req.params;
     const contact = await contactModel.findById(id, pool);

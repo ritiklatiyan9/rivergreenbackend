@@ -6,16 +6,18 @@ import { bustCache } from '../middlewares/cache.middleware.js';
 
 // ============================================================
 // Helper: scope filters based on role
+// Uses req.user directly (auth middleware populates site_id + team_id).
+// Falls back to a DB lookup only for ADMIN/OWNER who need a site_id
+// but somehow don't have one on the token (edge case).
 // ============================================================
 const getScopeFilters = async (user) => {
-    const dbUser = await userModel.findById(user.id, pool);
-    if (!dbUser || !dbUser.site_id) return null;
+    if (!user.site_id) return null;
 
-    const filters = { siteId: dbUser.site_id };
+    const filters = { siteId: user.site_id };
     if (user.role === 'AGENT') {
         filters.assignedTo = user.id;
     } else if (user.role === 'TEAM_HEAD') {
-        filters.teamId = dbUser.team_id;
+        filters.teamId = user.team_id || null;
     }
     return filters;
 };
@@ -30,8 +32,7 @@ export const createFollowup = asyncHandler(async (req, res) => {
         return res.status(400).json({ success: false, message: 'Lead and scheduled date are required' });
     }
 
-    const dbUser = await userModel.findById(req.user.id, pool);
-    if (!dbUser || !dbUser.site_id) {
+    if (!req.user.site_id) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
 
@@ -40,7 +41,7 @@ export const createFollowup = asyncHandler(async (req, res) => {
         : new Date(`${scheduled_date}T09:00:00`);
 
     const followup = await followupModel.create({
-        site_id: dbUser.site_id,
+        site_id: req.user.site_id,
         lead_id,
         assigned_to: req.user.id,
         created_by: req.user.id,
@@ -127,15 +128,14 @@ export const getMissedFollowups = asyncHandler(async (req, res) => {
 // GET FOLLOWUP COUNTS (for dashboard)
 // ============================================================
 export const getFollowupCounts = asyncHandler(async (req, res) => {
-    const dbUser = await userModel.findById(req.user.id, pool);
-    if (!dbUser || !dbUser.site_id) {
+    if (!req.user.site_id) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
 
     const assignedTo = req.user.role === 'AGENT' ? req.user.id : null;
-    const teamId = req.user.role === 'TEAM_HEAD' ? dbUser.team_id : null;
+    const teamId = req.user.role === 'TEAM_HEAD' ? req.user.team_id : null;
     const counts = await followupModel.getCounts({
-        siteId: dbUser.site_id,
+        siteId: req.user.site_id,
         assignedTo,
         teamId,
     }, pool);
@@ -239,4 +239,136 @@ export const escalateFollowup = asyncHandler(async (req, res) => {
 
     bustCache('cache:*:/api/followups*');
     res.json({ success: true, followup: updated });
+});
+
+// ============================================================
+// GET REMINDERS — unified followups + uncontacted leads, paginated
+// ============================================================
+export const getReminders = asyncHandler(async (req, res) => {
+    const scope = await getScopeFilters(req.user);
+    if (!scope) return res.status(404).json({ success: false, message: 'No site assigned' });
+
+    const { filter = 'all', search, page = 1, limit = 30 } = req.query;
+    const pg = parseInt(page) || 1;
+    const lim = Math.min(parseInt(limit) || 30, 100);
+    const offset = (pg - 1) * lim;
+
+    // Build scope WHERE for followups
+    const scopeWhere = [`f.site_id = $1`];
+    const params = [scope.siteId];
+    let idx = 2;
+    if (scope.assignedTo) { scopeWhere.push(`f.assigned_to = $${idx}`); params.push(scope.assignedTo); idx++; }
+    else if (scope.teamId) { scopeWhere.push(`f.assigned_to IN (SELECT id FROM users WHERE team_id = $${idx})`); params.push(scope.teamId); idx++; }
+
+    // Build scope WHERE for leads (reuse $1 for site_id)
+    const leadScopeWhere = [`l.site_id = $1`];
+    if (scope.assignedTo) {
+        const agentIdx = params.indexOf(scope.assignedTo) + 1;
+        leadScopeWhere.push(`(l.owner_id = $${agentIdx} OR l.assigned_to = $${agentIdx})`);
+    }
+
+    // Search filter
+    let searchClause = '';
+    if (search?.trim()) {
+        params.push(`%${search.trim()}%`);
+        searchClause = `AND (l.name ILIKE $${idx} OR l.phone ILIKE $${idx})`;
+        idx++;
+    }
+
+    // Status filter on followups
+    let statusFilter = '';
+    if (filter === 'pending') statusFilter = `AND f.status = 'PENDING'`;
+    else if (filter === 'completed') statusFilter = `AND f.status = 'COMPLETED'`;
+    else if (filter === 'snoozed') statusFilter = `AND f.status = 'SNOOZED'`;
+
+    const fWhere = scopeWhere.join(' AND ');
+    const lWhere = leadScopeWhere.join(' AND ');
+
+    // Counts query
+    const countsQ = `
+      SELECT
+        COUNT(*) FILTER (WHERE src='followup' AND raw_status='PENDING') AS pending,
+        COUNT(*) FILTER (WHERE src='followup' AND raw_status='COMPLETED') AS completed,
+        COUNT(*) FILTER (WHERE src='followup' AND raw_status='SNOOZED') AS snoozed,
+        COUNT(*) FILTER (WHERE src='lead') AS uncontacted,
+        COUNT(*) FILTER (WHERE src='followup' AND raw_status='PENDING' AND due_date::date = CURRENT_DATE) AS due_today
+      FROM (
+        SELECT 'followup' AS src, f.status AS raw_status, f.scheduled_at AS due_date
+        FROM followups f LEFT JOIN leads l ON f.lead_id = l.id
+        WHERE ${fWhere} ${searchClause}
+        UNION ALL
+        SELECT 'lead', 'UNCONTACTED', l.created_at
+        FROM leads l
+        WHERE ${lWhere} AND l.status NOT IN ('BOOKED','LOST')
+          AND NOT EXISTS (SELECT 1 FROM followups f2 WHERE f2.lead_id = l.id AND f2.status IN ('PENDING','SNOOZED'))
+          ${searchClause}
+      ) sub`;
+
+    const countsRes = await pool.query(countsQ, params);
+    const c = countsRes.rows[0] || {};
+
+    // Data query
+    const dataParams = [...params, lim, offset];
+    const limIdx = idx;
+    const offIdx = idx + 1;
+    let dataQ;
+
+    if (filter === 'uncontacted') {
+        dataQ = `
+          SELECT 'lead' AS source, l.id::text, 'NEW_LEAD' AS type, l.name AS client_name,
+            l.phone AS client_phone, l.id AS lead_id, l.notes AS description, l.created_at AS due_date,
+            'new_lead' AS status, 'UNCONTACTED' AS raw_status, l.status AS lead_status, NULL AS agent_name
+          FROM leads l
+          WHERE ${lWhere} AND l.status NOT IN ('BOOKED','LOST')
+            AND NOT EXISTS (SELECT 1 FROM followups f2 WHERE f2.lead_id = l.id AND f2.status IN ('PENDING','SNOOZED'))
+            ${searchClause}
+          ORDER BY l.created_at ASC LIMIT $${limIdx} OFFSET $${offIdx}`;
+    } else if (filter === 'all') {
+        dataQ = `
+          SELECT * FROM (
+            SELECT 'lead' AS source, l.id::text, 'NEW_LEAD' AS type, l.name AS client_name,
+              l.phone AS client_phone, l.id AS lead_id, l.notes AS description, l.created_at AS due_date,
+              'new_lead' AS status, 'UNCONTACTED' AS raw_status, l.status AS lead_status, NULL AS agent_name
+            FROM leads l
+            WHERE ${lWhere} AND l.status NOT IN ('BOOKED','LOST')
+              AND NOT EXISTS (SELECT 1 FROM followups f2 WHERE f2.lead_id = l.id AND f2.status IN ('PENDING','SNOOZED'))
+              ${searchClause}
+            UNION ALL
+            SELECT 'followup', f.id::text, COALESCE(f.followup_type,'CALL'), COALESCE(l.name,'Unknown'),
+              COALESCE(l.phone,'-'), f.lead_id, f.notes, f.scheduled_at,
+              CASE WHEN f.status='COMPLETED' THEN 'completed' WHEN f.status='SNOOZED' THEN 'snoozed' ELSE 'pending' END,
+              f.status, NULL, u.name
+            FROM followups f LEFT JOIN leads l ON f.lead_id = l.id LEFT JOIN users u ON f.assigned_to = u.id
+            WHERE ${fWhere} ${searchClause}
+          ) sub ORDER BY due_date ASC LIMIT $${limIdx} OFFSET $${offIdx}`;
+    } else {
+        dataQ = `
+          SELECT 'followup' AS source, f.id::text, COALESCE(f.followup_type,'CALL') AS type,
+            COALESCE(l.name,'Unknown') AS client_name, COALESCE(l.phone,'-') AS client_phone,
+            f.lead_id, f.notes AS description, f.scheduled_at AS due_date,
+            CASE WHEN f.status='COMPLETED' THEN 'completed' WHEN f.status='SNOOZED' THEN 'snoozed' ELSE 'pending' END AS status,
+            f.status AS raw_status, NULL AS lead_status, u.name AS agent_name
+          FROM followups f LEFT JOIN leads l ON f.lead_id = l.id LEFT JOIN users u ON f.assigned_to = u.id
+          WHERE ${fWhere} ${statusFilter} ${searchClause}
+          ORDER BY f.scheduled_at ASC LIMIT $${limIdx} OFFSET $${offIdx}`;
+    }
+
+    const dataRes = await pool.query(dataQ, dataParams);
+
+    const totalMap = {
+        all: [c.pending, c.completed, c.snoozed, c.uncontacted].reduce((s, v) => s + parseInt(v || 0), 0),
+        pending: parseInt(c.pending || 0), completed: parseInt(c.completed || 0),
+        snoozed: parseInt(c.snoozed || 0), uncontacted: parseInt(c.uncontacted || 0),
+    };
+
+    res.json({
+        success: true,
+        reminders: dataRes.rows,
+        counts: {
+            pending: parseInt(c.pending || 0), completed: parseInt(c.completed || 0),
+            snoozed: parseInt(c.snoozed || 0), uncontacted: parseInt(c.uncontacted || 0),
+            dueToday: parseInt(c.due_today || 0),
+        },
+        pagination: { page: pg, limit: lim, total: totalMap[filter] ?? totalMap.all, totalPages: Math.ceil((totalMap[filter] ?? totalMap.all) / lim) },
+    });
 });
