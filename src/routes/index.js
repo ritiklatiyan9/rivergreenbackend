@@ -23,6 +23,7 @@ import financialSettingsRoutes from './financialSettings.routes.js';
 import contactRoutes from './contact.routes.js';
 import directionsRoutes from './directions.routes.js';
 import razorpayRoutes from './razorpay.routes.js';
+import taskRoutes from './task.routes.js';
 
 router.use('/auth', authRoutes);
 router.use('/upload', uploadRoutes);
@@ -46,5 +47,6 @@ router.use('/financial-settings', financialSettingsRoutes);
 router.use('/contacts', contactRoutes);
 router.use('/directions', directionsRoutes);
 router.use('/razorpay', razorpayRoutes);
+router.use('/tasks', taskRoutes);
 
 export default router;
