@@ -9,7 +9,7 @@ import fs from 'fs';
 import { leadImportQueue } from '../utils/jobQueue.js';
 import { uploadSingle } from '../utils/upload.js';
 
-const VALID_STATUSES = ['NEW', 'CONTACTED', 'INTERESTED', 'SITE_VISIT', 'NEGOTIATION', 'BOOKED', 'LOST'];
+const VALID_STATUSES = ['NEW', 'CONTACTED', 'INTERESTED', 'SITE_VISIT', 'NEGOTIATION', 'BOOKED', 'LOST', 'INCOMING_OFF', 'SWITCH_OFF', 'NOT_ANSWERING'];
 
 const getSiteId = async (userId) => {
     const user = await userModel.findById(userId, pool);
@@ -218,13 +218,15 @@ export const updateLead = asyncHandler(async (req, res) => {
 
     const updatedLead = await leadModel.update(id, updateData, pool);
 
-    // Sync name/phone back to the linked contact (if any)
-    if (updateData.name || updateData.phone) {
-        const contactUpdate = {};
-        if (updateData.name) contactUpdate.name = updateData.name;
-        if (updateData.phone) contactUpdate.phone = updateData.phone;
-        const setCols = Object.keys(contactUpdate).map((k, i) => `${k} = $${i + 1}`).join(', ');
-        const vals = [...Object.values(contactUpdate), id];
+    // Sync name/phone/status/category back to the linked contact (if any)
+    const contactSyncFields = {};
+    if (updateData.name) contactSyncFields.name = updateData.name;
+    if (updateData.phone) contactSyncFields.phone = updateData.phone;
+    if (updateData.status !== undefined) contactSyncFields.status = updateData.status;
+    if (updateData.lead_category !== undefined) contactSyncFields.lead_category = updateData.lead_category;
+    if (Object.keys(contactSyncFields).length > 0) {
+        const setCols = Object.keys(contactSyncFields).map((k, i) => `${k} = $${i + 1}`).join(', ');
+        const vals = [...Object.values(contactSyncFields), id];
         await pool.query(
             `UPDATE contacts SET ${setCols}, updated_at = NOW() WHERE converted_lead_id = $${vals.length}`,
             vals

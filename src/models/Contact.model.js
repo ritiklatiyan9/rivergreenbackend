@@ -22,6 +22,19 @@ class Contact extends MasterModel {
             paramIndex++;
         }
 
+        // Filter directly on contacts' own columns (no lead join needed)
+        if (filters.status) {
+            whereClauses.push(`c.status = $${paramIndex}`);
+            params.push(filters.status);
+            paramIndex++;
+        }
+
+        if (filters.lead_category) {
+            whereClauses.push(`c.lead_category = $${paramIndex}`);
+            params.push(filters.lead_category);
+            paramIndex++;
+        }
+
         const whereString = 'WHERE ' + whereClauses.join(' AND ');
 
         const countResult = await pool.query(
@@ -34,17 +47,15 @@ class Contact extends MasterModel {
         params.push(limit, offset);
 
         const dataResult = await pool.query(
-                        `SELECT c.*, u.name as created_by_name,
-                                        COALESCE(cc.total_calls, 0)::int AS calls_dialed
+            `SELECT c.*, u.name as created_by_name,
+                     COALESCE(cc.total_calls, 0)::int AS calls_dialed
              FROM ${this.tableName} c
              LEFT JOIN users u ON c.created_by = u.id
-                         LEFT JOIN LATERAL (
-                                SELECT COUNT(*)::int AS total_calls
-                                FROM calls cl
-                                WHERE cl.site_id = c.site_id
-                                    AND c.converted_lead_id IS NOT NULL
-                                    AND cl.lead_id = c.converted_lead_id
-                         ) cc ON TRUE
+             LEFT JOIN (
+                 SELECT lead_id, COUNT(*)::int AS total_calls
+                 FROM calls
+                 GROUP BY lead_id
+             ) cc ON c.converted_lead_id = cc.lead_id
              ${whereString}
              ORDER BY c.created_at DESC
              LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,

@@ -77,19 +77,62 @@ class FollowupModel extends MasterModel {
         };
     }
 
-    // Get scheduled (pending + snoozed for future)
+    // Get scheduled (pending + snoozed for future) with status counts
     async findScheduled({ siteId, assignedTo, teamId, leadCategory, dateFrom, dateTo, page = 1, limit = 20 }, pool) {
-        return this.findWithDetails({
-            siteId,
-            assignedTo,
-            teamId,
-            leadCategory,
-            dateFrom,
-            dateTo,
-            status: ['PENDING', 'SNOOZED'],
-            page,
-            limit,
-        }, pool);
+        // Build shared WHERE conditions for the counts query
+        const countConditions = ['f.site_id = $1', "f.status = ANY($2)"];
+        const countParams = [siteId, ['PENDING', 'SNOOZED']];
+        let cIdx = 3;
+
+        if (assignedTo) { countConditions.push(`f.assigned_to = $${cIdx++}`); countParams.push(assignedTo); }
+        if (teamId) { countConditions.push(`u_agent.team_id = $${cIdx++}`); countParams.push(teamId); }
+        if (leadCategory && leadCategory !== 'ALL') { countConditions.push(`l.lead_category = $${cIdx++}`); countParams.push(leadCategory); }
+        if (dateFrom) { countConditions.push(`f.scheduled_at >= $${cIdx++}`); countParams.push(dateFrom); }
+        if (dateTo) { countConditions.push(`f.scheduled_at <= $${cIdx++}`); countParams.push(dateTo + 'T23:59:59'); }
+
+        const countWhere = countConditions.join(' AND ');
+        const countsQuery = `
+      SELECT
+        COUNT(*) FILTER (WHERE f.status = 'PENDING')::int AS pending,
+        COUNT(*) FILTER (WHERE f.status = 'SNOOZED')::int AS snoozed,
+        COUNT(*)::int AS total
+      FROM ${this.tableName} f
+      LEFT JOIN leads l ON f.lead_id = l.id
+      LEFT JOIN users u_agent ON f.assigned_to = u_agent.id
+      WHERE ${countWhere}
+    `;
+
+        // Run counts + data in parallel
+        const [countsResult, dataResult] = await Promise.all([
+            pool.query(countsQuery, countParams),
+            this.findWithDetails({
+                siteId, assignedTo, teamId, leadCategory,
+                dateFrom, dateTo,
+                status: ['PENDING', 'SNOOZED'],
+                page, limit,
+            }, pool),
+        ]);
+
+        // Completed today count (lightweight separate query)
+        const todayConditions = ['f.site_id = $1', "f.status = 'COMPLETED'", "f.completed_at::date = CURRENT_DATE"];
+        const todayParams = [siteId];
+        let tIdx = 2;
+        if (assignedTo) { todayConditions.push(`f.assigned_to = $${tIdx++}`); todayParams.push(assignedTo); }
+        if (teamId) { todayConditions.push(`u_agent.team_id = $${tIdx++}`); todayParams.push(teamId); }
+        const todayResult = await pool.query(
+            `SELECT COUNT(*)::int AS done_today FROM ${this.tableName} f LEFT JOIN users u_agent ON f.assigned_to = u_agent.id WHERE ${todayConditions.join(' AND ')}`,
+            todayParams
+        );
+
+        return {
+            ...dataResult,
+            counts: {
+                pending: countsResult.rows[0]?.pending || 0,
+                snoozed: countsResult.rows[0]?.snoozed || 0,
+                total: countsResult.rows[0]?.total || 0,
+                done_today: todayResult.rows[0]?.done_today || 0,
+            },
+        };
     }
 
     // Get missed (past-due PENDING items)

@@ -76,12 +76,18 @@ export const getContacts = asyncHandler(async (req, res) => {
     const siteId = await getSiteId(req.user.id);
     if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
-    const { page = 1, limit = 25, search } = req.query;
+    const { page = 1, limit = 25, search, status, lead_category } = req.query;
     const role = req.user.role;
     const scopedToUser = role === 'AGENT' || role === 'TEAM_HEAD';
 
     const result = await contactModel.findWithDetails(
-        { site_id: siteId, search, created_by: scopedToUser ? req.user.id : undefined },
+        {
+            site_id: siteId,
+            search,
+            created_by: scopedToUser ? req.user.id : undefined,
+            status: status || undefined,
+            lead_category: lead_category || undefined,
+        },
         parseInt(page),
         parseInt(limit),
         pool
@@ -98,7 +104,7 @@ export const getContacts = asyncHandler(async (req, res) => {
 // ============================================================
 export const updateContact = asyncHandler(async (req, res) => {
     const { id } = req.params;
-    const { name, phone } = req.body;
+    const { name, phone, status, lead_category } = req.body;
 
     if (!name?.trim() || !phone?.trim()) {
         return res.status(400).json({ success: false, message: 'Name and phone are required' });
@@ -120,13 +126,22 @@ export const updateContact = asyncHandler(async (req, res) => {
         }
     }
 
-    const updated = await contactModel.update(id, { name: name.trim(), phone: phone.trim() }, pool);
+    const updateData = { name: name.trim(), phone: phone.trim() };
+    if (status !== undefined) updateData.status = status;
+    if (lead_category !== undefined) updateData.lead_category = lead_category;
+
+    const updated = await contactModel.update(id, updateData, pool);
 
     // Sync name/phone to the linked lead (if contact was converted)
     if (contact.converted_lead_id) {
+        const leadSync = { name: name.trim(), phone: phone.trim() };
+        if (status !== undefined) leadSync.status = status;
+        if (lead_category !== undefined) leadSync.lead_category = lead_category;
+        const setCols = Object.keys(leadSync).map((k, i) => `${k} = $${i + 1}`).join(', ');
+        const vals = [...Object.values(leadSync), contact.converted_lead_id];
         await pool.query(
-            `UPDATE leads SET name = $1, phone = $2, updated_at = NOW() WHERE id = $3`,
-            [name.trim(), phone.trim(), contact.converted_lead_id]
+            `UPDATE leads SET ${setCols}, updated_at = NOW() WHERE id = $${vals.length}`,
+            vals
         );
         bustCache('cache:*:/api/followups*');
         bustCache('cache:*:/api/leads*');
@@ -190,10 +205,15 @@ export const convertContactToLead = asyncHandler(async (req, res) => {
         leadId = lead.id;
     }
 
-    // Mark as converted
+    // Mark as converted and set initial status from lead
+    const leadForStatus = existingLead.rows.length > 0
+        ? (await pool.query('SELECT status, lead_category FROM leads WHERE id = $1', [leadId])).rows[0]
+        : null;
     await contactModel.update(id, {
         is_converted: true,
         converted_lead_id: leadId,
+        status: leadForStatus?.status || 'NEW',
+        lead_category: leadForStatus?.lead_category || null,
     }, pool);
 
     bustContactCache();
