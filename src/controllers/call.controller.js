@@ -816,3 +816,30 @@ export const searchDialerContacts = asyncHandler(async (req, res) => {
 
     res.json({ success: true, ...result });
 });
+
+// ============================================================
+// SYNC DEVICE CALL LOG — bulk import from phone's native call log
+// ============================================================
+export const syncDeviceCallLog = asyncHandler(async (req, res) => {
+    const { calls } = req.body;
+    if (!Array.isArray(calls) || calls.length === 0) {
+        return res.status(400).json({ success: false, message: 'calls array is required' });
+    }
+
+    // Cap at 200 to prevent abuse
+    const capped = calls.slice(0, 200);
+
+    const siteId = await getSiteId(req.user.id);
+    if (!siteId) {
+        return res.status(404).json({ success: false, message: 'No site assigned' });
+    }
+
+    const result = await callModel.syncDeviceCallLog(capped, {
+        siteId,
+        userId: req.user.id,
+    }, pool);
+
+    bustCache('cache:*:/api/calls*');
+
+    res.json({ success: true, ...result });
+});

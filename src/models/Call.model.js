@@ -691,6 +691,62 @@ class CallModel extends MasterModel {
     const result = await pool.query(leadsQuery, params);
     return { results: result.rows };
   }
+
+  // ── Sync device call log: bulk upsert from phone's native call log ──
+  async syncDeviceCallLog(callsArray, { siteId, userId }, pool) {
+    if (!callsArray || callsArray.length === 0) return { synced: 0, skipped: 0 };
+
+    let synced = 0;
+    let skipped = 0;
+
+    for (const call of callsArray) {
+      const phone = String(call.phone_number || '').replace(/[^0-9+]/g, '');
+      if (!phone) { skipped++; continue; }
+
+      const callStart = call.call_start ? new Date(call.call_start) : new Date();
+      if (isNaN(callStart.getTime())) { skipped++; continue; }
+
+      // Deduplicate: check if a call with same phone + same call_start (±30s) already exists
+      const dupCheck = await pool.query(
+        `SELECT id FROM ${this.tableName}
+         WHERE assigned_to = $1 AND phone_number_dialed = $2
+           AND call_start BETWEEN ($3::timestamptz - interval '30 seconds') AND ($3::timestamptz + interval '30 seconds')
+         LIMIT 1`,
+        [userId, phone, callStart.toISOString()]
+      );
+      if (dupCheck.rows.length > 0) { skipped++; continue; }
+
+      // Try to find a matching lead
+      let leadId = null;
+      const phoneTail = phone.replace(/^(\+91|91|0)/, '');
+      const leadCheck = await pool.query(
+        `SELECT id FROM leads WHERE site_id = $1 AND (phone = $2 OR phone LIKE $3) LIMIT 1`,
+        [siteId, phone, `%${phoneTail}`]
+      );
+      if (leadCheck.rows[0]) leadId = leadCheck.rows[0].id;
+
+      const rawType = String(call.call_type || '').toUpperCase();
+      const callType = ['MISSED', 'REJECTED'].includes(rawType) ? 'MISSED'
+        : rawType === 'INCOMING' ? 'INCOMING'
+        : rawType === 'OUTGOING' ? 'OUTGOING'
+        : 'INCOMING';
+
+      const duration = Math.max(0, Number(call.duration_seconds) || 0);
+      const callStatus = duration > 0 ? 'COMPLETED' : (callType === 'MISSED' ? 'MISSED' : 'COMPLETED');
+
+      await pool.query(
+        `INSERT INTO ${this.tableName}
+          (site_id, lead_id, assigned_to, created_by, call_type, call_start, duration_seconds,
+           call_status, call_source, phone_number_dialed, is_manual_log)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+        [siteId, leadId, userId, userId, callType, callStart.toISOString(), duration,
+         callStatus, 'APP', phone, false]
+      );
+      synced++;
+    }
+
+    return { synced, skipped };
+  }
 }
 
 export default new CallModel();

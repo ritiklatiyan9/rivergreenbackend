@@ -20,6 +20,7 @@ import {
     getAdvancedAnalytics,
     getDialerHistory,
     searchDialerContacts,
+    syncDeviceCallLog,
 } from '../controllers/call.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import checkRole from '../middlewares/role.middleware.js';
@@ -58,6 +59,9 @@ router.get('/lead/:leadId', cacheMiddleware(60), getCallsByLead);
 
 // Quick log — agent clicks call icon
 router.post('/quick-log', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN']), quickLogCall);
+
+// Sync device call log — bulk import from phone's native call log
+router.post('/sync-device-log', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN']), syncDeviceCallLog);
 
 // End call session
 router.put('/:id/end', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN']), endCallSession);
