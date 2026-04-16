@@ -5,6 +5,7 @@ import {
     createLead,
     getLeads,
     getLeadStatusCounts,
+    getMatterLeadsList,
     updateLead,
     deleteLead,
     getLead,
@@ -65,6 +66,7 @@ router.get('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddle
 
 // Static routes BEFORE :id
 router.get('/counts', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(60), getLeadStatusCounts);
+router.get('/matter', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(60), getMatterLeadsList);
 router.get('/assignable-users', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(300), getAssignableUsers);
 router.get('/assignment-history', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getAllAssignmentHistory);
 router.post('/bulk-assign', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), bulkAssignLeads);

@@ -100,12 +100,40 @@ export const getLeadStatusCounts = asyncHandler(async (req, res) => {
         // For simplicity, filter by owner_or_assigned same as agent
         filters.owner_or_assigned = user.id;
     }
-    const rawCounts = await leadModel.getStatusCounts(filters, pool);
+    const [rawCounts, matterCount] = await Promise.all([
+        leadModel.getStatusCounts(filters, pool),
+        leadModel.getMatterLeadsCount(filters, pool),
+    ]);
     // Ensure all statuses are present with defaults
     const allStatuses = ['NEW', 'CONTACTED', 'INTERESTED', 'SITE_VISIT', 'NEGOTIATION', 'BOOKED', 'LOST', 'INCOMING_OFF', 'SWITCH_OFF', 'NOT_ANSWERING'];
     const counts = Object.fromEntries(allStatuses.map(s => [s, rawCounts[s] ?? 0]));
     const total = Object.values(counts).reduce((a, b) => a + b, 0);
-    return res.json({ success: true, counts, total });
+    return res.json({ success: true, counts, total, matterCount });
+});
+
+// ============================================================
+// GET MATTER LEADS — leads contacted at least once
+// ============================================================
+export const getMatterLeadsList = asyncHandler(async (req, res) => {
+    const user = await userModel.findById(req.user.id, pool);
+    if (!user?.site_id) {
+        return res.status(404).json({ success: false, message: 'No site assigned' });
+    }
+
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const filters = { site_id: user.site_id, search: req.query.search };
+
+    if (user.role === 'AGENT' || user.role === 'TEAM_HEAD') {
+        filters.owner_or_assigned = user.id;
+    }
+
+    const result = await leadModel.getMatterLeads(filters, page, limit, pool);
+    return res.json({
+        success: true,
+        leads: result.items,
+        pagination: result.pagination,
+    });
 });
 
 // ============================================================

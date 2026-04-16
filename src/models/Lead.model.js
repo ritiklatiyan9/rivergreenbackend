@@ -157,6 +157,102 @@ class LeadModel extends MasterModel {
         return counts;
     }
 
+    // Get count of matter leads (leads contacted at least once)
+    async getMatterLeadsCount(filters, pool) {
+        let whereClauses = ['l.site_id = l.site_id']; // always true placeholder
+        let params = [];
+        let paramIndex = 1;
+
+        if (filters.site_id) {
+            whereClauses = [`l.site_id = $${paramIndex++}`];
+            params.push(filters.site_id);
+        }
+        if (filters.owner_or_assigned) {
+            whereClauses.push(`(l.owner_id = $${paramIndex} OR l.assigned_to = $${paramIndex})`);
+            params.push(filters.owner_or_assigned);
+            paramIndex++;
+        } else if (filters.assigned_to) {
+            whereClauses.push(`l.assigned_to = $${paramIndex++}`);
+            params.push(filters.assigned_to);
+        }
+
+        const whereString = `WHERE ${whereClauses.join(' AND ')}`;
+        const query = `
+            SELECT COUNT(DISTINCT l.id)::int AS count
+            FROM leads l
+            INNER JOIN LATERAL (
+                SELECT 1 FROM calls c WHERE c.lead_id = l.id LIMIT 1
+            ) _c ON TRUE
+            ${whereString}
+        `;
+        const result = await pool.query(query, params);
+        return result.rows[0]?.count ?? 0;
+    }
+
+    // Get paginated matter leads (leads with at least 1 call logged)
+    async getMatterLeads(filters, page, limit, pool) {
+        const offset = (page - 1) * limit;
+        let whereClauses = [];
+        let params = [];
+        let paramIndex = 1;
+
+        if (filters.site_id) {
+            whereClauses.push(`l.site_id = $${paramIndex++}`);
+            params.push(filters.site_id);
+        }
+        if (filters.owner_or_assigned) {
+            whereClauses.push(`(l.owner_id = $${paramIndex} OR l.assigned_to = $${paramIndex})`);
+            params.push(filters.owner_or_assigned);
+            paramIndex++;
+        } else if (filters.assigned_to) {
+            whereClauses.push(`l.assigned_to = $${paramIndex++}`);
+            params.push(filters.assigned_to);
+        }
+        if (filters.search) {
+            whereClauses.push(`(l.name ILIKE $${paramIndex} OR l.phone ILIKE $${paramIndex})`);
+            params.push(`%${filters.search}%`);
+            paramIndex++;
+        }
+
+        const whereString = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+
+        const countQuery = `
+            SELECT COUNT(DISTINCT l.id)::int AS total
+            FROM leads l
+            INNER JOIN LATERAL (
+                SELECT 1 FROM calls c WHERE c.lead_id = l.id LIMIT 1
+            ) _c ON TRUE
+            ${whereString}
+        `;
+        const countResult = await pool.query(countQuery, params);
+        const total = countResult.rows[0]?.total ?? 0;
+
+        const dataQuery = `
+            SELECT l.*,
+                   u.name AS assigned_to_name,
+                   o.name AS owner_name,
+                   cs.call_count,
+                   cs.last_called_at
+            FROM leads l
+            INNER JOIN LATERAL (
+                SELECT COUNT(*)::int AS call_count,
+                       MAX(call_start) AS last_called_at
+                FROM calls c WHERE c.lead_id = l.id
+            ) cs ON cs.call_count > 0
+            LEFT JOIN users u ON l.assigned_to = u.id
+            LEFT JOIN users o ON l.owner_id = o.id
+            ${whereString}
+            ORDER BY cs.last_called_at DESC NULLS LAST
+            LIMIT $${paramIndex++} OFFSET $${paramIndex++}
+        `;
+        params.push(limit, offset);
+        const dataResult = await pool.query(dataQuery, params);
+        return {
+            items: dataResult.rows,
+            pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
+        };
+    }
+
     // Get assignment history for a lead
     async getAssignmentHistory(leadId, pool) {
         const query = `
