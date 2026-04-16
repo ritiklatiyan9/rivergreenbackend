@@ -66,6 +66,23 @@ export const getTeam = asyncHandler(async (req, res) => {
   res.json({ success: true, team: { ...team, heads }, members });
 });
 
+// Get current user's own team (no team_id needed from caller)
+export const getMyTeam = asyncHandler(async (req, res) => {
+  const currentUser = await userModel.findByIdSafe(req.user.id, pool);
+  if (!currentUser?.team_id) {
+    return res.status(404).json({ success: false, message: 'You are not assigned to a team' });
+  }
+
+  const team = await teamModel.findByIdAndSite(currentUser.team_id, currentUser.site_id, pool);
+  if (!team) {
+    return res.status(404).json({ success: false, message: 'Team not found' });
+  }
+
+  const members = await teamModel.getMembers(currentUser.team_id, pool);
+  const heads = await teamModel.getHeads(currentUser.team_id, pool);
+  res.json({ success: true, team: { ...team, heads }, members });
+});
+
 // Update Team
 export const updateTeam = asyncHandler(async (req, res) => {
   const { id } = req.params;

@@ -114,7 +114,7 @@ class UserModel extends MasterModel {
   }
 
   async findByIdSafe(id, pool) {
-    const query = `SELECT id, name, email, phone, profile_photo, role, sponsor_code, site_id, sponsor_id, parent_id, is_active, address, designation, bio, created_at, updated_at FROM ${this.tableName} WHERE id = $1`;
+    const query = `SELECT id, name, email, phone, profile_photo, role, sponsor_code, site_id, team_id, sponsor_id, parent_id, is_active, address, designation, bio, created_at, updated_at FROM ${this.tableName} WHERE id = $1`;
     const result = await pool.query(query, [id]);
     return result.rows[0];
   }

@@ -5,6 +5,7 @@ import {
   createTeam,
   listTeams,
   getTeam,
+  getMyTeam,
   updateTeam,
   deleteTeam,
   assignTeamHead,
@@ -27,6 +28,9 @@ router.use(authMiddleware);
 
 // Static paths MUST come before :id params
 router.get('/all/performance', authMiddleware, checkRole(['ADMIN']), cacheMiddleware(120), getAllTeamsPerformance);
+
+// Current user's own team (agent & team_head friendly)
+router.get('/my', authMiddleware, cacheMiddleware(120), getMyTeam);
 
 // Read-only access for agents & team heads (own team)
 router.get('/:id', authMiddleware, cacheMiddleware(300), getTeam);
