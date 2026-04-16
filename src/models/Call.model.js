@@ -628,8 +628,11 @@ class CallModel extends MasterModel {
 
     const query = `
       SELECT c.id, c.call_type, c.call_start, c.duration_seconds, c.call_status,
-             c.call_source, c.phone_number_dialed,
-             l.name as lead_name, l.phone as lead_phone,
+             c.call_source, c.phone_number_dialed, c.customer_notes, c.outcome_id,
+             c.next_action, c.lead_id,
+             l.name as lead_name, l.phone as lead_phone, l.status as lead_status,
+             l.lead_category, l.email as lead_email, l.address as lead_address,
+             l.profession as lead_profession,
              co.label as outcome_label
       FROM ${this.tableName} c
       LEFT JOIN leads l ON c.lead_id = l.id
