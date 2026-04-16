@@ -101,6 +101,7 @@ export const getLeads = asyncHandler(async (req, res) => {
     const filters = {
         site_id: siteId,
         status: req.query.status,
+        exclude_status: req.query.exclude_status,
         search: req.query.search,
         lead_category: req.query.lead_category,
     };

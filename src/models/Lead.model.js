@@ -57,6 +57,11 @@ class LeadModel extends MasterModel {
             params.push(filters.status);
         }
 
+        if (filters.exclude_status) {
+            whereClauses.push(`l.status != $${paramIndex++}`);
+            params.push(filters.exclude_status);
+        }
+
         if (filters.lead_category) {
             whereClauses.push(`l.lead_category = $${paramIndex++}`);
             params.push(filters.lead_category);
