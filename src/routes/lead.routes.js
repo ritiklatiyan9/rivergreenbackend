@@ -4,6 +4,7 @@ const router = express.Router();
 import {
     createLead,
     getLeads,
+    getLeadStatusCounts,
     updateLead,
     deleteLead,
     getLead,
@@ -62,7 +63,8 @@ router.use(authMiddleware);
 router.post('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), upload.single('photo'), createLead);
 router.get('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getLeads);
 
-// Assignment (static routes BEFORE :id)
+// Static routes BEFORE :id
+router.get('/counts', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(60), getLeadStatusCounts);
 router.get('/assignable-users', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(300), getAssignableUsers);
 router.get('/assignment-history', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getAllAssignmentHistory);
 router.post('/bulk-assign', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), bulkAssignLeads);

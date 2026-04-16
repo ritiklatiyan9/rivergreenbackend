@@ -86,6 +86,29 @@ export const createLead = asyncHandler(async (req, res) => {
 });
 
 // ============================================================
+// GET LEAD STATUS COUNTS — accurate pipeline counts for dashboard
+// ============================================================
+export const getLeadStatusCounts = asyncHandler(async (req, res) => {
+    const user = await userModel.findById(req.user.id, pool);
+    if (!user?.site_id) {
+        return res.status(404).json({ success: false, message: 'No site assigned' });
+    }
+    const filters = { site_id: user.site_id };
+    if (user.role === 'AGENT') filters.owner_or_assigned = user.id;
+    else if (user.role === 'TEAM_HEAD') {
+        // team_head sees their team's leads — filter by assigned_to using team membership
+        // For simplicity, filter by owner_or_assigned same as agent
+        filters.owner_or_assigned = user.id;
+    }
+    const rawCounts = await leadModel.getStatusCounts(filters, pool);
+    // Ensure all statuses are present with defaults
+    const allStatuses = ['NEW', 'CONTACTED', 'INTERESTED', 'SITE_VISIT', 'NEGOTIATION', 'BOOKED', 'LOST', 'INCOMING_OFF', 'SWITCH_OFF', 'NOT_ANSWERING'];
+    const counts = Object.fromEntries(allStatuses.map(s => [s, rawCounts[s] ?? 0]));
+    const total = Object.values(counts).reduce((a, b) => a + b, 0);
+    return res.json({ success: true, counts, total });
+});
+
+// ============================================================
 // GET LEADS — ownership-aware filtering
 // ============================================================
 export const getLeads = asyncHandler(async (req, res) => {

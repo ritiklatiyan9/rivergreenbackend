@@ -124,6 +124,39 @@ class LeadModel extends MasterModel {
         };
     }
 
+    // Get status counts (pipeline breakdown) for a site/agent/team
+    async getStatusCounts(filters, pool) {
+        let whereClauses = [];
+        let params = [];
+        let paramIndex = 1;
+
+        if (filters.site_id) {
+            whereClauses.push(`site_id = $${paramIndex++}`);
+            params.push(filters.site_id);
+        }
+        if (filters.owner_or_assigned) {
+            whereClauses.push(`(owner_id = $${paramIndex} OR assigned_to = $${paramIndex})`);
+            params.push(filters.owner_or_assigned);
+            paramIndex++;
+        } else if (filters.assigned_to) {
+            whereClauses.push(`assigned_to = $${paramIndex++}`);
+            params.push(filters.assigned_to);
+        }
+
+        const whereString = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+
+        const query = `
+            SELECT status, COUNT(*)::int AS count
+            FROM ${this.tableName}
+            ${whereString}
+            GROUP BY status
+        `;
+        const result = await pool.query(query, params);
+        const counts = {};
+        result.rows.forEach(r => { counts[r.status] = r.count; });
+        return counts;
+    }
+
     // Get assignment history for a lead
     async getAssignmentHistory(leadId, pool) {
         const query = `
