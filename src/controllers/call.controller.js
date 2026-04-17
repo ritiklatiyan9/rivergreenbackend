@@ -536,6 +536,7 @@ export const getShiftToCallQueue = asyncHandler(async (req, res) => {
 export const quickLogCall = asyncHandler(async (req, res) => {
     const { lead_id, phone_number, call_source, shift_queue_id } = req.body;
     const normalizeUpper = (value) => String(value || '').trim().toUpperCase();
+    const sanitizePhone = (value) => String(value || '').replace(/[^0-9+]/g, '');
 
     const ALLOWED_CALL_SOURCES = new Set(['WEB', 'APP', 'MANUAL']);
     const ALLOWED_CALL_STATUS = new Set(['RINGING', 'ACTIVE', 'COMPLETED', 'MISSED', 'FAILED']);
@@ -593,13 +594,72 @@ export const quickLogCall = asyncHandler(async (req, res) => {
         }
     }
 
+    targetPhone = sanitizePhone(targetPhone);
+
+    const requestedStartRaw = req.body.call_start ? new Date(req.body.call_start) : new Date();
+    const effectiveCallStart = Number.isNaN(requestedStartRaw.getTime()) ? new Date() : requestedStartRaw;
+
+    // Idempotency guard #1: if an active call already exists for same user + phone/lead, reuse it.
+    if (targetPhone || targetLeadId) {
+        const condition = targetPhone ? 'phone_number_dialed = $3' : 'lead_id = $3';
+        const identityValue = targetPhone || targetLeadId;
+
+        const activeDup = await pool.query(
+            `SELECT * FROM calls
+             WHERE site_id = $1
+               AND assigned_to = $2
+               AND ${condition}
+               AND COALESCE(call_status, 'ACTIVE') IN ('ACTIVE', 'RINGING')
+               AND (call_end IS NULL OR call_end > NOW() - INTERVAL '1 day')
+             ORDER BY call_start DESC
+             LIMIT 1`,
+            [siteId, req.user.id, identityValue]
+        );
+
+        if (activeDup.rows[0]) {
+            return res.status(200).json({
+                success: true,
+                deduped: true,
+                call: activeDup.rows[0],
+                phone: targetPhone,
+            });
+        }
+    }
+
+    // Idempotency guard #2: suppress duplicate end-events/log submissions in a short window.
+    if (normalizedCallStatus !== 'ACTIVE' && normalizedCallStatus !== 'RINGING' && (targetPhone || targetLeadId)) {
+        const condition = targetPhone ? 'phone_number_dialed = $3' : 'lead_id = $3';
+        const identityValue = targetPhone || targetLeadId;
+
+        const nearDup = await pool.query(
+            `SELECT * FROM calls
+             WHERE site_id = $1
+               AND assigned_to = $2
+               AND ${condition}
+               AND COALESCE(call_source, 'WEB') = $4
+               AND call_start BETWEEN ($5::timestamptz - INTERVAL '45 seconds') AND ($5::timestamptz + INTERVAL '45 seconds')
+             ORDER BY call_start DESC
+             LIMIT 1`,
+            [siteId, req.user.id, identityValue, normalizedCallSource, effectiveCallStart.toISOString()]
+        );
+
+        if (nearDup.rows[0]) {
+            return res.status(200).json({
+                success: true,
+                deduped: true,
+                call: nearDup.rows[0],
+                phone: targetPhone,
+            });
+        }
+    }
+
     const call = await callModel.quickLog({
         site_id: siteId,
         lead_id: targetLeadId || null,
         assigned_to: req.user.id,
         created_by: req.user.id,
         call_type: normalizedCallType,
-        call_start: req.body.call_start || new Date().toISOString(),
+        call_start: effectiveCallStart.toISOString(),
         call_end: req.body.duration_seconds ? new Date().toISOString() : null,
         duration_seconds: req.body.duration_seconds || 0,
         call_status: normalizedCallStatus,
@@ -659,7 +719,7 @@ export const quickLogCall = asyncHandler(async (req, res) => {
 // ============================================================
 export const endCallSession = asyncHandler(async (req, res) => {
     const { id } = req.params;
-    const { outcome_id, next_action, customer_notes, lead_category, duration_seconds } = req.body;
+    const { outcome_id, next_action, customer_notes, lead_category, duration_seconds, call_status } = req.body;
 
     const existing = await callModel.findById(id, pool);
     if (!existing) {
@@ -677,13 +737,19 @@ export const endCallSession = asyncHandler(async (req, res) => {
         ? Math.floor(parsedDuration)
         : Math.max(0, Math.floor((callEnd - callStart) / 1000));
 
+    const normalizedEndStatus = (() => {
+        const s = String(call_status || '').trim().toUpperCase();
+        if (['MISSED', 'FAILED', 'COMPLETED'].includes(s)) return s;
+        return durationSeconds > 0 ? 'COMPLETED' : 'MISSED';
+    })();
+
     const updatedCall = await callModel.endCall(id, {
         call_end: callEnd.toISOString(),
         duration_seconds: durationSeconds,
         outcome_id: outcome_id || null,
         next_action: next_action || 'NONE',
         customer_notes: customer_notes || null,
-        call_status: 'COMPLETED',
+        call_status: normalizedEndStatus,
     }, pool);
 
     // Update lead_category if provided
