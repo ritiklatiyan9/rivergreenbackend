@@ -4,13 +4,14 @@ import userModel from '../models/User.model.js';
 import pool from '../config/db.js';
 import { bustCache } from '../middlewares/cache.middleware.js';
 
-const getSiteId = async (userId) => {
+const getSiteId = async (userId, reqUser) => {
+  if (reqUser && reqUser.site_id) return reqUser.site_id;
   const user = await userModel.findById(userId, pool);
   return user?.site_id;
 };
 
 export const getClients = asyncHandler(async (req, res) => {
-  const siteId = await getSiteId(req.user.id);
+  const siteId = await getSiteId(req.user.id, req.user);
   if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
   const page = parseInt(req.query.page) || 1;
@@ -28,7 +29,7 @@ export const getClients = asyncHandler(async (req, res) => {
 });
 
 export const getClient = asyncHandler(async (req, res) => {
-  const siteId = await getSiteId(req.user.id);
+  const siteId = await getSiteId(req.user.id, req.user);
   if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
   const booking = await clientModel.findById(req.params.id, pool);
@@ -38,7 +39,7 @@ export const getClient = asyncHandler(async (req, res) => {
 });
 
 export const updateClient = asyncHandler(async (req, res) => {
-  const siteId = await getSiteId(req.user.id);
+  const siteId = await getSiteId(req.user.id, req.user);
   if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
   const existing = await clientModel.findById(req.params.id, pool);

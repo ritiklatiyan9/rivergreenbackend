@@ -41,6 +41,15 @@ const authMiddleware = async (req, res, next) => {
         if (siteCheck.rows[0]) {
           effectiveSiteId = siteCheck.rows[0].id;
         }
+      } else if (dbUser.role === 'SUPERVISOR') {
+        // Supervisor: check supervisor_site_access
+        const ssaCheck = await pool.query(
+          'SELECT site_id FROM supervisor_site_access WHERE supervisor_id = $1 AND site_id = $2 LIMIT 1',
+          [dbUser.id, requestedSiteId],
+        );
+        if (ssaCheck.rows[0]) {
+          effectiveSiteId = ssaCheck.rows[0].site_id;
+        }
       } else if (assignedSiteIds.includes(String(requestedSiteId))) {
         effectiveSiteId = requestedSiteId;
       }

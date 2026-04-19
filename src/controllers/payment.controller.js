@@ -6,7 +6,8 @@ import userModel from '../models/User.model.js';
 import pool from '../config/db.js';
 import { bustCache } from '../middlewares/cache.middleware.js';
 
-const getSiteId = async (userId) => {
+const getSiteId = async (userId, reqUser) => {
+  if (reqUser && reqUser.site_id) return reqUser.site_id;
   const user = await userModel.findById(userId, pool);
   return user?.site_id;
 };
@@ -30,7 +31,7 @@ export const recordPayment = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'Amount is required' });
   }
 
-  const siteId = await getSiteId(req.user.id);
+  const siteId = await getSiteId(req.user.id, req.user);
   if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
   // If booking_id is not provided, do not create a booking — allow payment linked to plot only
@@ -246,7 +247,7 @@ export const updatePayment = asyncHandler(async (req, res) => {
 // GET PAYMENTS
 // ============================================================
 export const getPayments = asyncHandler(async (req, res) => {
-  const siteId = await getSiteId(req.user.id);
+  const siteId = await getSiteId(req.user.id, req.user);
   if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
   const { page, limit, status, payment_type, date_from, date_to } = req.query;
@@ -282,7 +283,7 @@ export const getPaymentsByBooking = asyncHandler(async (req, res) => {
 // GET OVERDUE PAYMENTS
 // ============================================================
 export const getOverduePayments = asyncHandler(async (req, res) => {
-  const siteId = await getSiteId(req.user.id);
+  const siteId = await getSiteId(req.user.id, req.user);
   if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
   const payments = await paymentModel.findOverdue(siteId, pool);
@@ -293,7 +294,7 @@ export const getOverduePayments = asyncHandler(async (req, res) => {
 // PAYMENT STATS
 // ============================================================
 export const getPaymentStats = asyncHandler(async (req, res) => {
-  const siteId = await getSiteId(req.user.id);
+  const siteId = await getSiteId(req.user.id, req.user);
   if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
   // Agents see only their own stats

@@ -65,7 +65,11 @@ export const cacheMiddleware = (ttl = 300) => {
         const userId = req.user?.id;
         if (!userId) return next();
 
-        const cacheKey = `cache:${userId}:${req.originalUrl}`;
+        // Scope cache by effective site to prevent cross-site response bleed.
+        const requestedSiteId = req.header('x-site-id');
+        const effectiveSiteId = String(requestedSiteId || req.user?.site_id || 'no-site');
+
+        const cacheKey = `cache:${userId}:${effectiveSiteId}:${req.originalUrl}`;
 
         // Tier-1: memory hit
         const l1 = memCache.get(cacheKey);

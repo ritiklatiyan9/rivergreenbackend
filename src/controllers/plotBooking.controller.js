@@ -9,7 +9,8 @@ import { randomUUID } from 'crypto';
 import { uploadMany } from '../utils/upload.js';
 
 // Helper
-const getSiteId = async (userId) => {
+const getSiteId = async (userId, reqUser) => {
+  if (reqUser && reqUser.site_id) return reqUser.site_id;
   const user = await userModel.findById(userId, pool);
   return user?.site_id;
 };
@@ -30,7 +31,7 @@ export const createBooking = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'Plot, client name, and booking amount are required' });
   }
 
-  const siteId = await getSiteId(req.user.id);
+  const siteId = await getSiteId(req.user.id, req.user);
   if (!siteId) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }
@@ -180,7 +181,7 @@ export const agentBookPlot = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'Client name and phone are required' });
   }
 
-  const siteId = await getSiteId(req.user.id);
+  const siteId = await getSiteId(req.user.id, req.user);
   if (!siteId) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }
@@ -427,7 +428,7 @@ export const rejectBooking = asyncHandler(async (req, res) => {
 // GET PENDING APPROVALS (for admin)
 // ============================================================
 export const getPendingApprovals = asyncHandler(async (req, res) => {
-  const siteId = await getSiteId(req.user.id);
+  const siteId = await getSiteId(req.user.id, req.user);
   if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
   const result = await plotBookingModel.findBySite({
@@ -443,7 +444,7 @@ export const getPendingApprovals = asyncHandler(async (req, res) => {
 // GET BOOKINGS
 // ============================================================
 export const getBookings = asyncHandler(async (req, res) => {
-  const siteId = await getSiteId(req.user.id);
+  const siteId = await getSiteId(req.user.id, req.user);
   if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
   const { page, limit, status, plot_id, booked_by_id } = req.query;
@@ -845,7 +846,7 @@ export const publicBookPlot = asyncHandler(async (req, res) => {
 // BOOKING STATS
 // ============================================================
 export const getBookingStats = asyncHandler(async (req, res) => {
-  const siteId = await getSiteId(req.user.id);
+  const siteId = await getSiteId(req.user.id, req.user);
   if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
   // Agents only see stats for their own bookings

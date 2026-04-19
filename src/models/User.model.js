@@ -82,10 +82,11 @@ class UserModel extends MasterModel {
       ORDER BY
         CASE u.role
           WHEN 'ADMIN' THEN 1
-          WHEN 'TEAM_HEAD' THEN 2
-          WHEN 'AGENT' THEN 3
-          WHEN 'CLIENT' THEN 4
-          WHEN 'VISITOR' THEN 5
+          WHEN 'SUPERVISOR' THEN 2
+          WHEN 'TEAM_HEAD' THEN 3
+          WHEN 'AGENT' THEN 4
+          WHEN 'CLIENT' THEN 5
+          WHEN 'VISITOR' THEN 6
         END,
         u.created_at DESC
     `;

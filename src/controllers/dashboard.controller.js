@@ -5,7 +5,9 @@ import callModel from '../models/Call.model.js';
 import leadModel from '../models/Lead.model.js';
 import pool from '../config/db.js';
 
-const getSiteId = async (userId) => {
+const getSiteId = async (userId, reqUser) => {
+  // Prefer the site resolved by auth middleware (x-site-id header for OWNER/ADMIN).
+  if (reqUser?.site_id) return reqUser.site_id;
   const user = await userModel.findById(userId, pool);
   return user?.site_id;
 };
@@ -25,11 +27,13 @@ const getScopeFilters = (user) => {
 // ============================================================
 export const getDashboardStats = asyncHandler(async (req, res) => {
   const user = await userModel.findById(req.user.id, pool);
-  if (!user || !user.site_id) {
-    return res.status(404).json({ success: false, message: 'No yui site assigned' });
+  if (!user) {
+    return res.status(404).json({ success: false, message: 'User not found' });
   }
-
-  const siteId = user.site_id;
+  const siteId = req.user.site_id || user.site_id;
+  if (!siteId) {
+    return res.status(404).json({ success: false, message: 'No site assigned' });
+  }
   const scope = getScopeFilters(user);
 
   // Fetch all data in parallel
@@ -121,7 +125,7 @@ async function getBookingTrend(siteId, assignedTo) {
 // GET CONVERSION FUNNEL (Leads → Bookings → Completed)
 // ============================================================
 export const getConversionFunnel = asyncHandler(async (req, res) => {
-  const siteId = await getSiteId(req.user.id);
+  const siteId = await getSiteId(req.user.id, req.user);
   if (!siteId) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }
@@ -181,7 +185,7 @@ export const getConversionFunnel = asyncHandler(async (req, res) => {
 // GET TEAM PERFORMANCE
 // ============================================================
 export const getTeamPerformance = asyncHandler(async (req, res) => {
-  const siteId = await getSiteId(req.user.id);
+  const siteId = await getSiteId(req.user.id, req.user);
   if (!siteId) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }

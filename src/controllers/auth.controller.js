@@ -40,6 +40,27 @@ const getAccessibleSitesForUser = async (user) => {
     return sites.filter((site) => site.is_active !== false);
   }
 
+  // Supervisor: pull from supervisor_site_access table
+  if (user.role === 'SUPERVISOR') {
+    const ssaResult = await pool.query(
+      'SELECT site_id FROM supervisor_site_access WHERE supervisor_id = $1',
+      [user.id],
+    );
+    const siteIds = ssaResult.rows.map((r) => String(r.site_id));
+    // Include primary site_id as fallback
+    if (user.site_id && !siteIds.includes(String(user.site_id))) {
+      siteIds.unshift(String(user.site_id));
+    }
+    if (!siteIds.length) return [];
+
+    const sitesResult = await pool.query(
+      'SELECT * FROM sites WHERE id = ANY($1::uuid[]) AND is_active = true',
+      [siteIds],
+    );
+    const siteById = new Map(sitesResult.rows.map((site) => [String(site.id), site]));
+    return siteIds.map((id) => siteById.get(id)).filter(Boolean);
+  }
+
   await ensureUserSiteAccessTable(pool);
   const assignedSiteIds = await getUserAssignedSiteIds(user.id, pool, { includePrimary: true });
   if (!assignedSiteIds.length) return [];

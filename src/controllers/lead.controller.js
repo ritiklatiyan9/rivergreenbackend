@@ -11,7 +11,8 @@ import { uploadSingle } from '../utils/upload.js';
 
 const VALID_STATUSES = ['NEW', 'CONTACTED', 'INTERESTED', 'SITE_VISIT', 'NEGOTIATION', 'BOOKED', 'LOST', 'INCOMING_OFF', 'SWITCH_OFF', 'NOT_ANSWERING'];
 
-const getSiteId = async (userId) => {
+const getSiteId = async (userId, reqUser) => {
+    if (reqUser && reqUser.site_id) return reqUser.site_id;
     const user = await userModel.findById(userId, pool);
     return user?.site_id;
 };
@@ -32,7 +33,7 @@ export const createLead = asyncHandler(async (req, res) => {
         return res.status(400).json({ success: false, message: 'Name and either phone or email are required' });
     }
 
-    const siteId = await getSiteId(req.user.id);
+    const siteId = await getSiteId(req.user.id, req.user);
     if (!siteId) {
         return res.status(404).json({ success: false, message: 'No site assigned to this user' });
     }
@@ -126,6 +127,8 @@ export const getMatterLeadsList = asyncHandler(async (req, res) => {
 
     if (user.role === 'AGENT' || user.role === 'TEAM_HEAD') {
         filters.owner_or_assigned = user.id;
+    } else if (req.query.assigned_to) {
+        filters.assigned_to = req.query.assigned_to;
     }
 
     const result = await leadModel.getMatterLeads(filters, page, limit, pool);
@@ -140,7 +143,7 @@ export const getMatterLeadsList = asyncHandler(async (req, res) => {
 // GET LEADS — ownership-aware filtering
 // ============================================================
 export const getLeads = asyncHandler(async (req, res) => {
-    const siteId = await getSiteId(req.user.id);
+    const siteId = await getSiteId(req.user.id, req.user);
     if (!siteId) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
@@ -177,7 +180,7 @@ export const getLeads = asyncHandler(async (req, res) => {
 // GET SINGLE LEAD
 // ============================================================
 export const getLead = asyncHandler(async (req, res) => {
-    const siteId = await getSiteId(req.user.id);
+    const siteId = await getSiteId(req.user.id, req.user);
     if (!siteId) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
@@ -213,7 +216,7 @@ export const updateLead = asyncHandler(async (req, res) => {
     const { id } = req.params;
     const { name, phone, email, address, profession, status, assigned_to, notes, lead_category, lead_source } = req.body;
 
-    const siteId = await getSiteId(req.user.id);
+    const siteId = await getSiteId(req.user.id, req.user);
     const existingLead = await leadModel.findById(id, pool);
 
     if (!existingLead || existingLead.site_id !== siteId) {
@@ -300,7 +303,7 @@ export const updateLead = asyncHandler(async (req, res) => {
 // ============================================================
 export const deleteLead = asyncHandler(async (req, res) => {
     const { id } = req.params;
-    const siteId = await getSiteId(req.user.id);
+    const siteId = await getSiteId(req.user.id, req.user);
 
     const existingLead = await leadModel.findById(id, pool);
     if (!existingLead || existingLead.site_id !== siteId) {
@@ -324,7 +327,7 @@ export const assignLead = asyncHandler(async (req, res) => {
         return res.status(400).json({ success: false, message: 'assigned_to is required' });
     }
 
-    const siteId = await getSiteId(req.user.id);
+    const siteId = await getSiteId(req.user.id, req.user);
     const lead = await leadModel.findById(id, pool);
 
     if (!lead || lead.site_id !== siteId) {
@@ -368,7 +371,7 @@ export const bulkAssignLeads = asyncHandler(async (req, res) => {
         return res.status(400).json({ success: false, message: 'lead_ids and assigned_to are required' });
     }
 
-    const siteId = await getSiteId(req.user.id);
+    const siteId = await getSiteId(req.user.id, req.user);
     const targetUser = await userModel.findById(assigned_to, pool);
     if (!targetUser || targetUser.site_id !== siteId) {
         return res.status(404).json({ success: false, message: 'Target user not found' });
@@ -406,7 +409,7 @@ export const bulkAssignLeads = asyncHandler(async (req, res) => {
 // ============================================================
 export const getLeadAssignmentHistory = asyncHandler(async (req, res) => {
     const { id } = req.params;
-    const siteId = await getSiteId(req.user.id);
+    const siteId = await getSiteId(req.user.id, req.user);
     const lead = await leadModel.findById(id, pool);
 
     if (!lead || lead.site_id !== siteId) {
@@ -421,7 +424,7 @@ export const getLeadAssignmentHistory = asyncHandler(async (req, res) => {
 // GET ALL ASSIGNMENT HISTORY
 // ============================================================
 export const getAllAssignmentHistory = asyncHandler(async (req, res) => {
-    const siteId = await getSiteId(req.user.id);
+    const siteId = await getSiteId(req.user.id, req.user);
     if (!siteId) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
@@ -449,7 +452,7 @@ export const getAllAssignmentHistory = asyncHandler(async (req, res) => {
 // GET ASSIGNABLE USERS (for dropdowns)
 // ============================================================
 export const getAssignableUsers = asyncHandler(async (req, res) => {
-    const siteId = await getSiteId(req.user.id);
+    const siteId = await getSiteId(req.user.id, req.user);
     if (!siteId) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
@@ -470,7 +473,7 @@ export const getAssignableUsers = asyncHandler(async (req, res) => {
 // GET LEAD FULL DETAILS (lead + call history + followups)
 // ============================================================
 export const getLeadFullDetails = asyncHandler(async (req, res) => {
-    const siteId = await getSiteId(req.user.id);
+    const siteId = await getSiteId(req.user.id, req.user);
     if (!siteId) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
@@ -525,7 +528,7 @@ export const bulkUploadLeads = asyncHandler(async (req, res) => {
 
     const filePath = req.file.path;
 
-    const siteId = await getSiteId(req.user.id);
+    const siteId = await getSiteId(req.user.id, req.user);
     if (!siteId) {
         try { fs.unlinkSync(filePath); } catch { }
         return res.status(404).json({ success: false, message: 'No site assigned to this user' });
@@ -785,7 +788,7 @@ const ensureShiftToCallTable = async (db) => {
 };
 
 export const shiftLeadsToCall = asyncHandler(async (req, res) => {
-    const siteId = await getSiteId(req.user.id);
+    const siteId = await getSiteId(req.user.id, req.user);
     if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
     const { lead_ids = [], select_all = false, search = '', status = '', lead_category = '' } = req.body || {};

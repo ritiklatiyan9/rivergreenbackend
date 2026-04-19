@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS users (
   phone VARCHAR(20),
   password VARCHAR(255) NOT NULL,
   role VARCHAR(20) NOT NULL DEFAULT 'VISITOR'
-    CHECK (role IN ('OWNER', 'ADMIN', 'TEAM_HEAD', 'AGENT', 'CLIENT', 'VISITOR')),
+    CHECK (role IN ('OWNER', 'ADMIN', 'SUPERVISOR', 'TEAM_HEAD', 'AGENT', 'CLIENT', 'VISITOR')),
 
   -- Multi-tenant: which site this user belongs to (NULL for OWNER)
   site_id UUID REFERENCES sites(id) ON DELETE CASCADE,

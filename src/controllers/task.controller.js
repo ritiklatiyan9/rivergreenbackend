@@ -4,7 +4,8 @@ import userModel from '../models/User.model.js';
 import pool from '../config/db.js';
 import { bustCache } from '../middlewares/cache.middleware.js';
 
-const getSiteId = async (userId) => {
+const getSiteId = async (userId, reqUser) => {
+    if (reqUser && reqUser.site_id) return reqUser.site_id;
     const user = await userModel.findById(userId, pool);
     return user?.site_id;
 };
@@ -15,7 +16,7 @@ const bustTaskCache = () => {
 
 // ── GET ALL TASKS ────────────────────────────────────────────────────────────
 export const getTasks = asyncHandler(async (req, res) => {
-    const siteId = await getSiteId(req.user.id);
+    const siteId = await getSiteId(req.user.id, req.user);
     if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
     const { status, priority, due_date, search, overdue } = req.query;
@@ -32,7 +33,7 @@ export const getTasks = asyncHandler(async (req, res) => {
 
 // ── GET TASK STATS ───────────────────────────────────────────────────────────
 export const getTaskStats = asyncHandler(async (req, res) => {
-    const siteId = await getSiteId(req.user.id);
+    const siteId = await getSiteId(req.user.id, req.user);
     if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
     const stats = await taskModel.getStats(siteId, pool);
@@ -47,7 +48,7 @@ export const createTask = asyncHandler(async (req, res) => {
         return res.status(400).json({ success: false, message: 'Title and due date are required' });
     }
 
-    const siteId = await getSiteId(req.user.id);
+    const siteId = await getSiteId(req.user.id, req.user);
     if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
     const task = await taskModel.create({
@@ -123,7 +124,7 @@ export const getTaskShiftHistory = asyncHandler(async (req, res) => {
 
 // ── AUTO-SHIFT OVERDUE ───────────────────────────────────────────────────────
 export const autoShiftOverdue = asyncHandler(async (req, res) => {
-    const siteId = await getSiteId(req.user.id);
+    const siteId = await getSiteId(req.user.id, req.user);
     if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
     const shiftedIds = await taskModel.autoShiftOverdue(siteId, pool);

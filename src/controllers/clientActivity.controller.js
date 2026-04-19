@@ -4,7 +4,8 @@ import userModel from '../models/User.model.js';
 import pool from '../config/db.js';
 import { bustCache } from '../middlewares/cache.middleware.js';
 
-const getSiteId = async (userId) => {
+const getSiteId = async (userId, reqUser) => {
+  if (reqUser && reqUser.site_id) return reqUser.site_id;
   const user = await userModel.findById(userId, pool);
   return user?.site_id;
 };
@@ -23,7 +24,7 @@ export const createActivity = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'Activity type and title are required' });
   }
 
-  const siteId = await getSiteId(req.user.id);
+  const siteId = await getSiteId(req.user.id, req.user);
   if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
   const activity = await clientActivityModel.create({
@@ -55,7 +56,7 @@ export const createActivity = asyncHandler(async (req, res) => {
 // GET ACTIVITIES
 // ============================================================
 export const getActivities = asyncHandler(async (req, res) => {
-  const siteId = await getSiteId(req.user.id);
+  const siteId = await getSiteId(req.user.id, req.user);
   if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
   const dbUser = await userModel.findById(req.user.id, pool);
@@ -141,7 +142,7 @@ export const deleteActivity = asyncHandler(async (req, res) => {
 // TODAY'S ACTIVITIES
 // ============================================================
 export const getTodayActivities = asyncHandler(async (req, res) => {
-  const siteId = await getSiteId(req.user.id);
+  const siteId = await getSiteId(req.user.id, req.user);
   if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
   const assignedTo = req.user.role === 'AGENT' ? req.user.id : null;
@@ -153,7 +154,7 @@ export const getTodayActivities = asyncHandler(async (req, res) => {
 // ACTIVITY STATS
 // ============================================================
 export const getActivityStats = asyncHandler(async (req, res) => {
-  const siteId = await getSiteId(req.user.id);
+  const siteId = await getSiteId(req.user.id, req.user);
   if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
   const assignedTo = req.user.role === 'AGENT' ? req.user.id : null;

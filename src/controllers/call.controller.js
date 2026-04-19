@@ -10,7 +10,8 @@ import redisClient from '../config/redis.js';
 // ============================================================
 // Helper: Get requester's site_id
 // ============================================================
-const getSiteId = async (userId) => {
+const getSiteId = async (userId, reqUser) => {
+    if (reqUser && reqUser.site_id) return reqUser.site_id;
     const user = await userModel.findById(userId, pool);
     if (!user || !user.site_id) return null;
     return user.site_id;
@@ -67,7 +68,7 @@ export const logCall = asyncHandler(async (req, res) => {
         return res.status(400).json({ success: false, message: 'Lead is required' });
     }
 
-    const siteId = await getSiteId(req.user.id);
+    const siteId = await getSiteId(req.user.id, req.user);
     if (!siteId) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
@@ -294,7 +295,7 @@ export const getCallAnalytics = asyncHandler(async (req, res) => {
 // GET CALL OUTCOMES (master list)
 // ============================================================
 export const getCallOutcomes = asyncHandler(async (req, res) => {
-    const siteId = await getSiteId(req.user.id);
+    const siteId = await getSiteId(req.user.id, req.user);
     if (!siteId) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
@@ -317,7 +318,7 @@ export const bulkLogCalls = asyncHandler(async (req, res) => {
         return res.status(400).json({ success: false, message: 'Maximum 50 calls per batch' });
     }
 
-    const siteId = await getSiteId(req.user.id);
+    const siteId = await getSiteId(req.user.id, req.user);
     if (!siteId) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
@@ -559,7 +560,7 @@ export const quickLogCall = asyncHandler(async (req, res) => {
         return res.status(400).json({ success: false, message: 'Lead ID or Phone Number is required' });
     }
 
-    const siteId = await getSiteId(req.user.id);
+    const siteId = await getSiteId(req.user.id, req.user);
     if (!siteId) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
@@ -895,7 +896,7 @@ export const syncDeviceCallLog = asyncHandler(async (req, res) => {
     // Cap at 200 to prevent abuse
     const capped = calls.slice(0, 200);
 
-    const siteId = await getSiteId(req.user.id);
+    const siteId = await getSiteId(req.user.id, req.user);
     if (!siteId) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }

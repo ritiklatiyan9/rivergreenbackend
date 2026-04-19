@@ -43,28 +43,44 @@ class Contact extends MasterModel {
         );
         const total = parseInt(countResult.rows[0].count);
 
-        const offset = (page - 1) * limit;
-        params.push(limit, offset);
-
-        const dataResult = await pool.query(
-            `SELECT c.*, u.name as created_by_name,
+        const baseQuery = `
+            SELECT c.*, u.name as created_by_name,
                      COALESCE(cc.total_calls, 0)::int AS calls_dialed
-             FROM ${this.tableName} c
-             LEFT JOIN users u ON c.created_by = u.id
-             LEFT JOIN (
-                 SELECT lead_id, COUNT(*)::int AS total_calls
-                 FROM calls
-                 GROUP BY lead_id
-             ) cc ON c.converted_lead_id = cc.lead_id
-             ${whereString}
-             ORDER BY c.created_at DESC
-             LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
-            params
-        );
+            FROM ${this.tableName} c
+            LEFT JOIN users u ON c.created_by = u.id
+            LEFT JOIN (
+                SELECT lead_id, COUNT(*)::int AS total_calls
+                FROM calls
+                GROUP BY lead_id
+            ) cc ON c.converted_lead_id = cc.lead_id
+            ${whereString}
+            ORDER BY c.created_at DESC
+        `;
+
+        let dataResult;
+        let resolvedPage = page;
+        let resolvedLimit = limit;
+        let totalPages;
+
+        if (limit <= 0) {
+            dataResult = await pool.query(baseQuery, params);
+            resolvedPage = 1;
+            resolvedLimit = total;
+            totalPages = 1;
+        } else {
+            const offset = (page - 1) * limit;
+            const pagedParams = [...params, limit, offset];
+            dataResult = await pool.query(
+                `${baseQuery}
+                 LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
+                pagedParams
+            );
+            totalPages = Math.ceil(total / limit);
+        }
 
         return {
             items: dataResult.rows,
-            pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
+            pagination: { total, page: resolvedPage, limit: resolvedLimit, totalPages },
         };
     }
 

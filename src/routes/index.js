@@ -24,6 +24,12 @@ import contactRoutes from './contact.routes.js';
 import directionsRoutes from './directions.routes.js';
 import razorpayRoutes from './razorpay.routes.js';
 import taskRoutes from './task.routes.js';
+import categoryRoutes from './category.routes.js';
+import productRoutes from './product.routes.js';
+import stockRoutes from './stock.routes.js';
+import supervisorRoutes from './supervisor.routes.js';
+import supervisionTaskRoutes from './supervisionTask.routes.js';
+import { ldAuthRouter, ldRouter, ldAdminRouter } from './luckyDraw.routes.js';
 
 router.use('/auth', authRoutes);
 router.use('/upload', uploadRoutes);
@@ -48,5 +54,15 @@ router.use('/contacts', contactRoutes);
 router.use('/directions', directionsRoutes);
 router.use('/razorpay', razorpayRoutes);
 router.use('/tasks', taskRoutes);
+router.use('/categories', categoryRoutes);
+router.use('/products', productRoutes);
+router.use('/stocks', stockRoutes);
+router.use('/supervisors', supervisorRoutes);
+router.use('/supervision-tasks', supervisionTaskRoutes);
+
+// Lucky Draw module
+router.use('/ld-auth', ldAuthRouter);      // Lucky Draw login surface
+router.use('/ld', ldRouter);               // Manager + Agent panel APIs
+router.use('/admin/lucky-draw', ldAdminRouter); // Admin surface
 
 export default router;

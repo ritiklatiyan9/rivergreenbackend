@@ -7,7 +7,8 @@ import { bustCache } from '../middlewares/cache.middleware.js';
 import { read as xlsxRead, utils as xlsxUtils } from 'xlsx';
 import fs from 'fs';
 
-const getSiteId = async (userId) => {
+const getSiteId = async (userId, reqUser) => {
+    if (reqUser && reqUser.site_id) return reqUser.site_id;
     const user = await userModel.findById(userId, pool);
     if (!user || !user.site_id) return null;
     return user.site_id;
@@ -49,7 +50,7 @@ export const createContact = asyncHandler(async (req, res) => {
         return res.status(400).json({ success: false, message: 'Name and phone are required' });
     }
 
-    const siteId = await getSiteId(req.user.id);
+    const siteId = await getSiteId(req.user.id, req.user);
     if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
     // Check duplicate
@@ -73,12 +74,21 @@ export const createContact = asyncHandler(async (req, res) => {
 // GET CONTACTS — paginated list (includes converted and non-converted)
 // ============================================================
 export const getContacts = asyncHandler(async (req, res) => {
-    const siteId = await getSiteId(req.user.id);
+    const siteId = await getSiteId(req.user.id, req.user);
     if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
     const { page = 1, limit = 25, search, status, lead_category } = req.query;
     const role = req.user.role;
     const scopedToUser = role === 'AGENT' || role === 'TEAM_HEAD';
+    const parsedPageNumber = parseInt(page, 10);
+    const parsedLimitNumber = parseInt(limit, 10);
+
+    const parsedPage = Number.isInteger(parsedPageNumber) && parsedPageNumber > 0
+        ? parsedPageNumber
+        : 1;
+    const parsedLimit = String(limit).toLowerCase() === 'all'
+        ? -1
+        : (Number.isInteger(parsedLimitNumber) && parsedLimitNumber > 0 ? parsedLimitNumber : 25);
 
     const result = await contactModel.findWithDetails(
         {
@@ -88,8 +98,8 @@ export const getContacts = asyncHandler(async (req, res) => {
             status: status || undefined,
             lead_category: lead_category || undefined,
         },
-        parseInt(page),
-        parseInt(limit),
+        parsedPage,
+        parsedLimit,
         pool
     );
 
@@ -175,7 +185,7 @@ export const deleteContact = asyncHandler(async (req, res) => {
 export const convertContactToLead = asyncHandler(async (req, res) => {
     const { id } = req.params;
 
-    const siteId = await getSiteId(req.user.id);
+    const siteId = await getSiteId(req.user.id, req.user);
     if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
     const contact = await contactModel.findById(id, pool);
@@ -226,7 +236,7 @@ export const convertContactToLead = asyncHandler(async (req, res) => {
 // SHIFT CONTACTS TO CALL QUEUE
 // ============================================================
 export const shiftContactsToCall = asyncHandler(async (req, res) => {
-    const siteId = await getSiteId(req.user.id);
+    const siteId = await getSiteId(req.user.id, req.user);
     if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
     const { contact_ids = [], select_all = false, search = '' } = req.body || {};
@@ -373,7 +383,7 @@ export const bulkUploadContacts = asyncHandler(async (req, res) => {
 
     const filePath = req.file.path;
 
-    const siteId = await getSiteId(req.user.id);
+    const siteId = await getSiteId(req.user.id, req.user);
     if (!siteId) {
         try { fs.unlinkSync(filePath); } catch { }
         return res.status(404).json({ success: false, message: 'No site assigned' });

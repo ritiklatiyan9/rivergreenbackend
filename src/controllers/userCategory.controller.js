@@ -7,6 +7,7 @@ import { bustCache } from '../middlewares/cache.middleware.js';
 // List all categories for admin's site
 export const listCategories = asyncHandler(async (req, res) => {
     const adminUser = await userModel.findById(req.user.id, pool);
+  if (adminUser && !adminUser.site_id && req.user?.site_id) adminUser.site_id = req.user.site_id;
     if (!adminUser || !adminUser.site_id) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
@@ -18,6 +19,7 @@ export const listCategories = asyncHandler(async (req, res) => {
 // List active categories (for registration dropdown)
 export const listActiveCategories = asyncHandler(async (req, res) => {
     const adminUser = await userModel.findById(req.user.id, pool);
+  if (adminUser && !adminUser.site_id && req.user?.site_id) adminUser.site_id = req.user.site_id;
     if (!adminUser || !adminUser.site_id) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
@@ -35,6 +37,7 @@ export const createCategory = asyncHandler(async (req, res) => {
     }
 
     const adminUser = await userModel.findById(req.user.id, pool);
+  if (adminUser && !adminUser.site_id && req.user?.site_id) adminUser.site_id = req.user.site_id;
     if (!adminUser || !adminUser.site_id) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
@@ -56,6 +59,7 @@ export const updateCategory = asyncHandler(async (req, res) => {
     const { name, description, field_groups, is_active } = req.body;
 
     const adminUser = await userModel.findById(req.user.id, pool);
+  if (adminUser && !adminUser.site_id && req.user?.site_id) adminUser.site_id = req.user.site_id;
     if (!adminUser || !adminUser.site_id) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
@@ -91,6 +95,7 @@ export const deleteCategory = asyncHandler(async (req, res) => {
     const { id } = req.params;
 
     const adminUser = await userModel.findById(req.user.id, pool);
+  if (adminUser && !adminUser.site_id && req.user?.site_id) adminUser.site_id = req.user.site_id;
     if (!adminUser || !adminUser.site_id) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
