@@ -3,12 +3,33 @@ import pool from '../config/db.js';
 import { bustCache } from '../middlewares/cache.middleware.js';
 
 const bustSupervisionCache = () => {
-  bustCache('cache:*:/api/supervision-tasks*');
+  // Cache keys are `cache:{userId}:{siteId}:{originalUrl}` — need two
+  // wildcards between `cache:` and the URL, otherwise the bust never matches.
+  bustCache('cache:*:*:/api/supervision-tasks*');
+};
+
+// Normalize an attachment entry coming in from the client. We store a thin
+// JSON record so the client only has to send the S3 url (+ optional key).
+const normalizeAttachment = (att, userId) => {
+  if (!att) return null;
+  const url = typeof att === 'string' ? att : att.url;
+  if (!url || typeof url !== 'string') return null;
+  return {
+    url,
+    key: (att && att.key) || null,
+    uploaded_at: (att && att.uploaded_at) || new Date().toISOString(),
+    uploaded_by: (att && att.uploaded_by) || userId || null,
+  };
+};
+
+const sanitizeAttachments = (list, userId) => {
+  if (!Array.isArray(list)) return [];
+  return list.map((a) => normalizeAttachment(a, userId)).filter(Boolean);
 };
 
 // ── CREATE TASK (Admin assigns to Supervisor) ─────────────────────────────
 export const createSupervisionTask = asyncHandler(async (req, res) => {
-  const { title, description, assigned_to, site_id, priority, due_date } = req.body;
+  const { title, description, assigned_to, site_id, priority, due_date, admin_attachments } = req.body;
   if (!title || !assigned_to) {
     return res.status(400).json({ success: false, message: 'Title and assigned supervisor are required' });
   }
@@ -19,11 +40,23 @@ export const createSupervisionTask = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'Assigned user is not a supervisor' });
   }
 
+  const cleanedAdminAttachments = sanitizeAttachments(admin_attachments, req.user.id);
+
   const result = await pool.query(
-    `INSERT INTO supervision_tasks (title, description, assigned_to, assigned_by, site_id, priority, due_date)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `INSERT INTO supervision_tasks
+       (title, description, assigned_to, assigned_by, site_id, priority, due_date, admin_attachments)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
      RETURNING *`,
-    [title, description || null, assigned_to, req.user.id, site_id || null, priority || 'MEDIUM', due_date || null]
+    [
+      title,
+      description || null,
+      assigned_to,
+      req.user.id,
+      site_id || null,
+      priority || 'MEDIUM',
+      due_date || null,
+      JSON.stringify(cleanedAdminAttachments),
+    ]
   );
 
   bustSupervisionCache();
@@ -112,7 +145,10 @@ export const getSupervisionTask = asyncHandler(async (req, res) => {
 // ── UPDATE TASK (Admin updates details) ───────────────────────────────────
 export const updateSupervisionTask = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { title, description, assigned_to, site_id, priority, due_date, status } = req.body;
+  const {
+    title, description, assigned_to, site_id, priority, due_date, status,
+    admin_attachments, proof_attachments,
+  } = req.body;
 
   // Verify task exists
   const existing = await pool.query('SELECT * FROM supervision_tasks WHERE id = $1', [id]);
@@ -122,31 +158,50 @@ export const updateSupervisionTask = asyncHandler(async (req, res) => {
 
   const task = existing.rows[0];
 
-  // Supervisors can only update status (mark progress/complete)
+  // Supervisors can only update status + proof_attachments on their own tasks
   if (req.user.role === 'SUPERVISOR') {
     if (task.assigned_to !== req.user.id) {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
-    // Only allow status change
     const newStatus = status || task.status;
     const completedAt = newStatus === 'COMPLETED' ? new Date().toISOString() : task.completed_at;
+    const proof = proof_attachments !== undefined
+      ? sanitizeAttachments(proof_attachments, req.user.id)
+      : task.proof_attachments;
 
     const result = await pool.query(
-      `UPDATE supervision_tasks SET status = $1, completed_at = $2, updated_at = NOW() WHERE id = $3 RETURNING *`,
-      [newStatus, completedAt, id]
+      `UPDATE supervision_tasks
+         SET status = $1,
+             completed_at = $2,
+             proof_attachments = $3::jsonb,
+             updated_at = NOW()
+       WHERE id = $4
+       RETURNING *`,
+      [newStatus, completedAt, JSON.stringify(proof), id]
     );
     bustSupervisionCache();
     return res.json({ success: true, task: result.rows[0] });
   }
 
   // Admin/Owner full update
-  const completedAt = (status === 'COMPLETED' && task.status !== 'COMPLETED') ? new Date().toISOString() : (status !== 'COMPLETED' ? null : task.completed_at);
+  const completedAt = (status === 'COMPLETED' && task.status !== 'COMPLETED')
+    ? new Date().toISOString()
+    : (status && status !== 'COMPLETED' ? null : task.completed_at);
+
+  const nextAdminAttachments = admin_attachments !== undefined
+    ? sanitizeAttachments(admin_attachments, req.user.id)
+    : task.admin_attachments;
+  const nextProofAttachments = proof_attachments !== undefined
+    ? sanitizeAttachments(proof_attachments, req.user.id)
+    : task.proof_attachments;
 
   const result = await pool.query(
     `UPDATE supervision_tasks
      SET title = $1, description = $2, assigned_to = $3, site_id = $4,
-         priority = $5, due_date = $6, status = $7, completed_at = $8, updated_at = NOW()
-     WHERE id = $9
+         priority = $5, due_date = $6, status = $7, completed_at = $8,
+         admin_attachments = $9::jsonb, proof_attachments = $10::jsonb,
+         updated_at = NOW()
+     WHERE id = $11
      RETURNING *`,
     [
       title || task.title,
@@ -157,6 +212,8 @@ export const updateSupervisionTask = asyncHandler(async (req, res) => {
       due_date !== undefined ? due_date : task.due_date,
       status || task.status,
       completedAt,
+      JSON.stringify(nextAdminAttachments),
+      JSON.stringify(nextProofAttachments),
       id
     ]
   );
