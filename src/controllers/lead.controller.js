@@ -23,6 +23,29 @@ const bustLeadCache = () => {
     bustCache('cache:*:/api/followups*');
 };
 
+// ────────────────────────────────────────────────────────────────────────────
+// Idempotent schema guard — makes sure the import-batch columns exist before
+// any bulk-upload or batch-listing code paths touch them. Cheap, runs once
+// per process; safe to call on every request (DDL is IF NOT EXISTS).
+// ────────────────────────────────────────────────────────────────────────────
+let _importBatchColumnsReady = null;
+const ensureImportBatchColumns = async () => {
+    if (_importBatchColumnsReady) return _importBatchColumnsReady;
+    _importBatchColumnsReady = (async () => {
+        await pool.query(`
+            ALTER TABLE IF EXISTS leads
+              ADD COLUMN IF NOT EXISTS import_job_id UUID REFERENCES bulk_import_jobs(id) ON DELETE SET NULL
+        `);
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_leads_import_job_id ON leads(import_job_id)`);
+        await pool.query(`ALTER TABLE IF EXISTS bulk_import_jobs ADD COLUMN IF NOT EXISTS label TEXT`);
+    })().catch((err) => {
+        console.error('[ensureImportBatchColumns] failed:', err.message);
+        _importBatchColumnsReady = null; // allow retry on next call
+        throw err;
+    });
+    return _importBatchColumnsReady;
+};
+
 // ============================================================
 // CREATE LEAD — owner_id = creator, assigned_to = self by default
 // ============================================================
@@ -158,6 +181,7 @@ export const getLeads = asyncHandler(async (req, res) => {
         exclude_status: req.query.exclude_status,
         search: req.query.search,
         lead_category: req.query.lead_category,
+        import_job_id: req.query.import_job_id,
     };
 
     // Agents & Team Heads see only leads they own or are assigned to
@@ -526,6 +550,8 @@ export const bulkUploadLeads = asyncHandler(async (req, res) => {
         return res.status(400).json({ success: false, message: 'No Excel file uploaded' });
     }
 
+    await ensureImportBatchColumns();
+
     const filePath = req.file.path;
 
     const siteId = await getSiteId(req.user.id, req.user);
@@ -647,7 +673,7 @@ async function processLeadBulkJob(jobId, leads, siteId, createdByUserId) {
 
         for (const lead of batch) {
             placeholders.push(
-                `($${pIdx++},$${pIdx++},$${pIdx++},$${pIdx++},$${pIdx++},$${pIdx++},$${pIdx++},$${pIdx++},$${pIdx++},$${pIdx++},NOW(),NOW())`
+                `($${pIdx++},$${pIdx++},$${pIdx++},$${pIdx++},$${pIdx++},$${pIdx++},$${pIdx++},$${pIdx++},$${pIdx++},$${pIdx++},$${pIdx++},NOW(),NOW())`
             );
             values.push(
                 lead.name,
@@ -660,13 +686,14 @@ async function processLeadBulkJob(jobId, leads, siteId, createdByUserId) {
                 createdByUserId,
                 createdByUserId, // owner_id = uploader
                 lead.notes || null,
+                jobId,
             );
         }
 
         try {
             await pool.query(
                 `INSERT INTO leads
-                   (name, phone, email, address, profession, status, site_id, created_by, owner_id, notes, created_at, updated_at)
+                   (name, phone, email, address, profession, status, site_id, created_by, owner_id, notes, import_job_id, created_at, updated_at)
                  VALUES ${placeholders.join(',')}`,
                 values
             );
@@ -679,13 +706,13 @@ async function processLeadBulkJob(jobId, leads, siteId, createdByUserId) {
                 try {
                     await pool.query(
                         `INSERT INTO leads
-                           (name, phone, email, address, profession, status, site_id, created_by, owner_id, notes, created_at, updated_at)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW(),NOW())`,
+                           (name, phone, email, address, profession, status, site_id, created_by, owner_id, notes, import_job_id, created_at, updated_at)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW(),NOW())`,
                         [
                             lead.name, lead.phone || null, lead.email || null,
                             lead.address || null, lead.profession || null,
                             lead.status || 'NEW', siteId, createdByUserId, createdByUserId,
-                            lead.notes || null,
+                            lead.notes || null, jobId,
                         ]
                     );
                     processedCount++;
@@ -752,6 +779,105 @@ export const getBulkJobStatus = asyncHandler(async (req, res) => {
         startedAt: job.started_at,
         completedAt: job.completed_at,
     });
+});
+
+// ============================================================
+// IMPORT BATCHES — list + rename
+// ------------------------------------------------------------
+// Lists recent bulk import jobs for the caller's site so the UI can show a
+// dropdown of "Import 1 · Apr 18", "Import 2 · Apr 19", etc. and filter leads
+// by the selected batch. Labels default to "Import N" (most-recent = 1) and
+// can be renamed via PATCH so the agent can give batches meaningful names.
+// ============================================================
+export const listImportBatches = asyncHandler(async (req, res) => {
+    await ensureImportBatchColumns();
+
+    const siteId = await getSiteId(req.user.id, req.user);
+    if (!siteId) {
+        return res.status(404).json({ success: false, message: 'No site assigned' });
+    }
+
+    const isAgentScoped = (req.user.role === 'AGENT' || req.user.role === 'TEAM_HEAD');
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 200);
+
+    // Only surface jobs that still have leads the caller can see.
+    const leadScopeClauses = ['l.import_job_id = j.id', 'l.site_id = $1'];
+    const params = [siteId];
+    let p = 2;
+
+    if (isAgentScoped) {
+        leadScopeClauses.push(`(l.owner_id = $${p} OR l.assigned_to = $${p})`);
+        params.push(req.user.id);
+        p++;
+    }
+
+    const { rows } = await pool.query(
+        `
+        SELECT j.id,
+               j.label,
+               j.status,
+               j.total_rows,
+               j.processed_rows,
+               j.failed_rows,
+               j.created_at,
+               j.completed_at,
+               COALESCE(lc.lead_count, 0)::int AS lead_count
+        FROM bulk_import_jobs j
+        LEFT JOIN LATERAL (
+            SELECT COUNT(*)::int AS lead_count
+            FROM leads l
+            WHERE ${leadScopeClauses.join(' AND ')}
+        ) lc ON TRUE
+        WHERE j.site_id = $1
+          AND COALESCE(lc.lead_count, 0) > 0
+        ORDER BY j.created_at DESC
+        LIMIT $${p}
+        `,
+        [...params, limit]
+    );
+
+    // Number newest = 1 so the default label matches the user's mental model.
+    const batches = rows.map((row, idx) => ({
+        id: row.id,
+        label: row.label || `Import ${idx + 1}`,
+        default_label: `Import ${idx + 1}`,
+        lead_count: row.lead_count,
+        total_rows: row.total_rows,
+        status: row.status,
+        created_at: row.created_at,
+        completed_at: row.completed_at,
+    }));
+
+    res.json({ success: true, batches });
+});
+
+export const renameImportBatch = asyncHandler(async (req, res) => {
+    await ensureImportBatchColumns();
+
+    const siteId = await getSiteId(req.user.id, req.user);
+    if (!siteId) {
+        return res.status(404).json({ success: false, message: 'No site assigned' });
+    }
+
+    const { id } = req.params;
+    const label = typeof req.body?.label === 'string' ? req.body.label.trim() : '';
+    if (!label) {
+        return res.status(400).json({ success: false, message: 'Label is required' });
+    }
+    if (label.length > 80) {
+        return res.status(400).json({ success: false, message: 'Label must be 80 characters or less' });
+    }
+
+    const { rowCount } = await pool.query(
+        `UPDATE bulk_import_jobs SET label = $1, updated_at = NOW() WHERE id = $2 AND site_id = $3`,
+        [label, id, siteId]
+    );
+    if (!rowCount) {
+        return res.status(404).json({ success: false, message: 'Import batch not found' });
+    }
+
+    bustLeadCache();
+    res.json({ success: true, id, label });
 });
 
 // ============================================================

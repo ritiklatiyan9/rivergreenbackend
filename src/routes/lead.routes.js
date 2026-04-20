@@ -12,6 +12,8 @@ import {
     getLeadFullDetails,
     bulkUploadLeads,
     getBulkJobStatus,
+    listImportBatches,
+    renameImportBatch,
     assignLead,
     bulkAssignLeads,
     getLeadAssignmentHistory,
@@ -92,6 +94,19 @@ router.get(
     checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']),
     cacheMiddleware(15),
     getBulkJobStatus
+);
+
+// Import batches — list + rename (used by Fresh Leads stage dropdown)
+router.get(
+    '/import-batches',
+    checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']),
+    cacheMiddleware(30),
+    listImportBatches
+);
+router.patch(
+    '/import-batches/:id',
+    checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']),
+    renameImportBatch
 );
 
 export default router;
