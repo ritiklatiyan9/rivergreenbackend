@@ -74,6 +74,19 @@ router.get('/assignment-history', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWN
 router.post('/bulk-assign', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), bulkAssignLeads);
 router.post('/shift-to-call', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), shiftLeadsToCall);
 
+// Import batches — list + rename (used by Fresh Leads stage dropdown)
+router.get(
+    '/import-batches',
+    checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']),
+    cacheMiddleware(30),
+    listImportBatches
+);
+router.patch(
+    '/import-batches/:id',
+    checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']),
+    renameImportBatch
+);
+
 // Single lead routes
 router.get('/:id/full', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getLeadFullDetails);
 router.get('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getLead);
@@ -94,19 +107,6 @@ router.get(
     checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']),
     cacheMiddleware(15),
     getBulkJobStatus
-);
-
-// Import batches — list + rename (used by Fresh Leads stage dropdown)
-router.get(
-    '/import-batches',
-    checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']),
-    cacheMiddleware(30),
-    listImportBatches
-);
-router.patch(
-    '/import-batches/:id',
-    checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']),
-    renameImportBatch
 );
 
 export default router;

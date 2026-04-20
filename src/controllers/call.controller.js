@@ -202,6 +202,7 @@ export const updateCall = asyncHandler(async (req, res) => {
         'call_type', 'call_start', 'call_end', 'outcome_id', 'next_action',
         'customer_notes', 'buying_timeline', 'budget_confirmation',
         'visit_preference_date', 'specific_requests', 'rejection_reason',
+        'lead_id',
     ];
 
     const updateData = {};
