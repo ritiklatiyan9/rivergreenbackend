@@ -601,55 +601,68 @@ export const quickLogCall = asyncHandler(async (req, res) => {
     const requestedStartRaw = req.body.call_start ? new Date(req.body.call_start) : new Date();
     const effectiveCallStart = Number.isNaN(requestedStartRaw.getTime()) ? new Date() : requestedStartRaw;
 
-    // Idempotency guard #1: if an active call already exists for same user + phone/lead, reuse it.
+    // ──────────────────────────────────────────────────────────────────────
+    // Unified idempotency: a single physical call should always map to ONE row,
+    // regardless of which code path logs it first (dial-time quick-log vs
+    // call-end CallDetectorBridge.logCallNow). We look for ANY recent call for
+    // the same user+phone/lead within a 2-minute window and reconcile:
+    //   • incoming COMPLETED + existing ACTIVE  → UPDATE the ACTIVE row with
+    //     the final duration/status and return it (prevents "ghost ACTIVE" + a
+    //     separate COMPLETED row from coexisting).
+    //   • otherwise                              → return the existing row
+    //     (dedup — the caller already has this record).
+    // ──────────────────────────────────────────────────────────────────────
     if (targetPhone || targetLeadId) {
         const condition = targetPhone ? 'phone_number_dialed = $3' : 'lead_id = $3';
         const identityValue = targetPhone || targetLeadId;
 
-        const activeDup = await pool.query(
+        const nearby = await pool.query(
             `SELECT * FROM calls
              WHERE site_id = $1
                AND assigned_to = $2
                AND ${condition}
-               AND COALESCE(call_status, 'ACTIVE') IN ('ACTIVE', 'RINGING')
-               AND (call_end IS NULL OR call_end > NOW() - INTERVAL '1 day')
+               AND call_start BETWEEN ($4::timestamptz - INTERVAL '2 minutes') AND ($4::timestamptz + INTERVAL '2 minutes')
              ORDER BY call_start DESC
              LIMIT 1`,
-            [siteId, req.user.id, identityValue]
+            [siteId, req.user.id, identityValue, effectiveCallStart.toISOString()]
         );
 
-        if (activeDup.rows[0]) {
+        const existing = nearby.rows[0];
+        if (existing) {
+            const existingStatus = String(existing.call_status || 'ACTIVE').toUpperCase();
+            const incomingIsCompleted = normalizedCallStatus !== 'ACTIVE' && normalizedCallStatus !== 'RINGING';
+            const existingIsOpen = existingStatus === 'ACTIVE' || existingStatus === 'RINGING';
+            const incomingDuration = Number(req.body.duration_seconds) || 0;
+
+            // Upgrade the open dial-time row to COMPLETED using the call-end
+            // submission's duration — keeps timeline / recents in sync.
+            if (incomingIsCompleted && existingIsOpen) {
+                const endTimestamp = new Date().toISOString();
+                const { rows: [updated] } = await pool.query(
+                    `UPDATE calls
+                     SET call_status      = $1,
+                         duration_seconds = GREATEST(COALESCE(duration_seconds, 0), $2),
+                         call_end         = COALESCE(call_end, $3::timestamptz),
+                         call_type        = COALESCE($4, call_type),
+                         updated_at       = NOW()
+                     WHERE id = $5
+                     RETURNING *`,
+                    [normalizedCallStatus, incomingDuration, endTimestamp, normalizedCallType, existing.id]
+                );
+                bustCache('cache:*:/api/calls*');
+                return res.status(200).json({
+                    success: true,
+                    deduped: true,
+                    reconciled: true,
+                    call: updated,
+                    phone: targetPhone,
+                });
+            }
+
             return res.status(200).json({
                 success: true,
                 deduped: true,
-                call: activeDup.rows[0],
-                phone: targetPhone,
-            });
-        }
-    }
-
-    // Idempotency guard #2: suppress duplicate end-events/log submissions in a short window.
-    if (normalizedCallStatus !== 'ACTIVE' && normalizedCallStatus !== 'RINGING' && (targetPhone || targetLeadId)) {
-        const condition = targetPhone ? 'phone_number_dialed = $3' : 'lead_id = $3';
-        const identityValue = targetPhone || targetLeadId;
-
-        const nearDup = await pool.query(
-            `SELECT * FROM calls
-             WHERE site_id = $1
-               AND assigned_to = $2
-               AND ${condition}
-               AND COALESCE(call_source, 'WEB') = $4
-               AND call_start BETWEEN ($5::timestamptz - INTERVAL '45 seconds') AND ($5::timestamptz + INTERVAL '45 seconds')
-             ORDER BY call_start DESC
-             LIMIT 1`,
-            [siteId, req.user.id, identityValue, normalizedCallSource, effectiveCallStart.toISOString()]
-        );
-
-        if (nearDup.rows[0]) {
-            return res.status(200).json({
-                success: true,
-                deduped: true,
-                call: nearDup.rows[0],
+                call: existing,
                 phone: targetPhone,
             });
         }
