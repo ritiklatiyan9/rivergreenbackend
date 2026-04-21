@@ -9,10 +9,14 @@ import {
   getOverduePayments,
   getPaymentStats,
   deletePayment,
+  verifyReceiptToken,
 } from '../controllers/payment.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import checkRole from '../middlewares/role.middleware.js';
 import { cacheMiddleware } from '../middlewares/cache.middleware.js';
+
+// Public: verify farmer payment receipt (no auth) — MUST be before authMiddleware
+router.get('/verify-receipt', verifyReceiptToken);
 
 // All payment routes require auth
 router.use(authMiddleware);
