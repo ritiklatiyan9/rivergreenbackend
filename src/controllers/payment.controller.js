@@ -20,7 +20,8 @@ export const verifyReceiptToken = (req, res) => {
     }
 
     const decoded = JSON.parse(Buffer.from(String(token), 'base64url').toString('utf8'));
-    const { payload, sig } = decoded || {};
+    const payload = decoded?.p;
+    const sig = decoded?.s;
     if (!payload || !sig) {
       return res.status(400).json({ valid: false, message: 'Malformed token' });
     }
