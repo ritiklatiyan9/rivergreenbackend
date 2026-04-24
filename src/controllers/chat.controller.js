@@ -21,7 +21,7 @@ const pushChatNotification = (conversationId, senderId, msg) => {
         ? `Sent a file: ${msg.file_name}`
         : 'New message';
 
-      await fcmService.sendToUsers(recipientIds, {
+      const result = await fcmService.sendToUsers(recipientIds, {
         title: senderName,
         body: preview,
         data: {
@@ -35,6 +35,7 @@ const pushChatNotification = (conversationId, senderId, msg) => {
           route: `/chat?c=${encodeURIComponent(conversationId)}`,
         },
       });
+      console.log(`[chat] FCM push -> recipients=${recipientIds.length} sent=${result?.sent ?? 0} failed=${result?.failed ?? 0} reason=${result?.reason ?? '-'}`);
     } catch (e) {
       console.error('[chat] FCM notify failed:', e?.message || e);
     }
