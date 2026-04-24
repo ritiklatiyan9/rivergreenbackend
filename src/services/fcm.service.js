@@ -64,8 +64,28 @@ const init = () => {
 };
 
 // ── Token storage helpers ─────────────────────────────────────────────────
+// Lazy-create the table on first touch so deploys don't need a separate
+// migration step (same pattern as ensureUserSiteAccessTable).
+let _tableEnsured = false;
+const ensureTable = async () => {
+  if (_tableEnsured) return;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_fcm_tokens (
+      id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token      TEXT NOT NULL UNIQUE,
+      platform   TEXT NOT NULL DEFAULT 'android',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_user_fcm_tokens_user_id ON user_fcm_tokens (user_id)');
+  _tableEnsured = true;
+};
+
 export const upsertToken = async (userId, token, platform = 'android') => {
   if (!userId || !token) return;
+  await ensureTable();
   await pool.query(
     `INSERT INTO user_fcm_tokens (user_id, token, platform, updated_at)
      VALUES ($1, $2, $3, NOW())
@@ -79,17 +99,20 @@ export const upsertToken = async (userId, token, platform = 'android') => {
 
 export const deleteToken = async (token) => {
   if (!token) return;
+  await ensureTable();
   await pool.query('DELETE FROM user_fcm_tokens WHERE token = $1', [token]);
 };
 
 export const deleteTokensForUser = async (userId) => {
   if (!userId) return;
+  await ensureTable();
   await pool.query('DELETE FROM user_fcm_tokens WHERE user_id = $1', [userId]);
 };
 
 const getTokensForUsers = async (userIds) => {
   const ids = (userIds || []).filter(Boolean);
   if (ids.length === 0) return [];
+  await ensureTable();
   const res = await pool.query(
     'SELECT token FROM user_fcm_tokens WHERE user_id = ANY($1::uuid[])',
     [ids],
