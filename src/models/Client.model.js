@@ -6,6 +6,7 @@ class ClientModel extends MasterModel {
   }
 
   // List clients (bookings with client info or completed/active bookings)
+  // and ef
   async findClients({ siteId, search, status, page = 1, limit = 20 }, pool) {
     const conditions = ['pb.site_id = $1'];
     const params = [siteId];
