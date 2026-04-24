@@ -12,6 +12,7 @@ import {
 	setActiveSite,
 	registerFcmToken,
 	removeFcmToken,
+	sendTestPush,
 } from '../controllers/auth.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import upload from '../middlewares/multer.middleware.js';
@@ -28,5 +29,6 @@ router.put('/profile', authMiddleware, upload.single('profile_photo'), updatePro
 // Push notifications — device token lifecycle
 router.post('/fcm-token', authMiddleware, registerFcmToken);
 router.delete('/fcm-token', authMiddleware, removeFcmToken);
+router.post('/fcm-test', authMiddleware, sendTestPush);
 
 export default router;

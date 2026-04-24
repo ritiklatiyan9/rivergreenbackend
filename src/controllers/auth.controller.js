@@ -272,6 +272,21 @@ export const removeFcmToken = asyncHandler(async (req, res) => {
   res.json({ success: true });
 });
 
+// One-off diagnostic: send a test push to the currently-authenticated user's
+// registered devices. Logs the full FCM response so Render logs show exactly
+// what Firebase said. Body: { title?, body? }
+export const sendTestPush = asyncHandler(async (req, res) => {
+  const title = req.body?.title || 'Test notification';
+  const body = req.body?.body || 'If you see this, FCM is wired up end-to-end.';
+  const result = await fcmService.sendToUsers([req.user.id], {
+    title,
+    body,
+    data: { type: 'test', route: '/dashboard' },
+  });
+  console.log(`[fcm-test] user=${req.user.id.slice(0,8)} result=${JSON.stringify(result)}`);
+  res.json({ success: true, result });
+});
+
 // Get current user profile
 export const getMe = asyncHandler(async (req, res) => {
   const user = await userModel.findByIdSafe(req.user.id, pool);
