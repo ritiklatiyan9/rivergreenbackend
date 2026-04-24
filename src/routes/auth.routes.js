@@ -10,6 +10,8 @@ import {
 	updateProfile,
 	getAccessibleSites,
 	setActiveSite,
+	registerFcmToken,
+	removeFcmToken,
 } from '../controllers/auth.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import upload from '../middlewares/multer.middleware.js';
@@ -22,5 +24,9 @@ router.get('/me', authMiddleware, getMe);
 router.get('/sites', authMiddleware, getAccessibleSites);
 router.put('/active-site', authMiddleware, setActiveSite);
 router.put('/profile', authMiddleware, upload.single('profile_photo'), updateProfile);
+
+// Push notifications — device token lifecycle
+router.post('/fcm-token', authMiddleware, registerFcmToken);
+router.delete('/fcm-token', authMiddleware, removeFcmToken);
 
 export default router;

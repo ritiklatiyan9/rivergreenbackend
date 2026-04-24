@@ -1,5 +1,45 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import chatService from '../services/chat.service.js';
+import fcmService from '../services/fcm.service.js';
+
+// Fire-and-forget FCM push for a newly-created chat message. Runs after the
+// HTTP response so it never blocks the sender, and never throws — chat
+// delivery must keep working even if FCM is unreachable.
+const pushChatNotification = (conversationId, senderId, msg) => {
+  setImmediate(async () => {
+    try {
+      const participants = await chatService.getConversationParticipants(conversationId);
+      const recipientIds = participants
+        .map((p) => p.id)
+        .filter((id) => id && id !== senderId);
+      if (recipientIds.length === 0) return;
+
+      const senderName = msg?.sender?.name || 'New message';
+      const preview = msg?.message_text
+        ? msg.message_text.slice(0, 140)
+        : msg?.file_name
+        ? `Sent a file: ${msg.file_name}`
+        : 'New message';
+
+      await fcmService.sendToUsers(recipientIds, {
+        title: senderName,
+        body: preview,
+        data: {
+          type: 'chat',
+          conversation_id: String(conversationId),
+          message_id: String(msg?.id ?? ''),
+          sender_id: String(senderId),
+          sender_name: senderName,
+          // Deep-link target — the mobile app reads this on tap and
+          // navigates with react-router to the conversation.
+          route: `/chat?c=${encodeURIComponent(conversationId)}`,
+        },
+      });
+    } catch (e) {
+      console.error('[chat] FCM notify failed:', e?.message || e);
+    }
+  });
+};
 
 /**
  * GET /api/chat/conversations
@@ -106,6 +146,7 @@ export const sendMessage = asyncHandler(async (req, res) => {
     });
   }
 
+  pushChatNotification(id, req.user.id, msg);
   res.status(201).json({ success: true, message: msg });
 });
 
@@ -133,6 +174,7 @@ export const sendFileMessage = asyncHandler(async (req, res) => {
     });
   }
 
+  pushChatNotification(id, req.user.id, msg);
   res.status(201).json({ success: true, message: msg });
 });
 

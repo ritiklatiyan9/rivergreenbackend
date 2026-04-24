@@ -5,6 +5,7 @@ import siteModel from '../models/Site.model.js';
 import pool from '../config/db.js';
 import { uploadSingle } from '../utils/upload.js';
 import { ensureUserSiteAccessTable, getUserAssignedSiteIds } from '../utils/userSiteAccess.js';
+import fcmService from '../services/fcm.service.js';
 
 const REFRESH_COOKIE_OPTIONS = {
   httpOnly: true,
@@ -241,8 +242,34 @@ export const refresh = asyncHandler(async (req, res) => {
 export const logout = asyncHandler(async (req, res) => {
   const userId = req.user.id;
   await userModel.update(userId, { refresh_token: null }, pool);
+  // Clear the FCM token for this device so the logged-out user stops
+  // receiving pushes destined for the previous account on this phone.
+  const token = req.body?.fcm_token;
+  if (token) {
+    try { await fcmService.deleteToken(token); } catch { /* non-fatal */ }
+  }
   res.clearCookie('refreshToken', CLEAR_COOKIE_OPTIONS);
   res.json({ success: true, message: 'Logged out' });
+});
+
+// Register / refresh the FCM token for this device.
+// Body: { token, platform? }
+export const registerFcmToken = asyncHandler(async (req, res) => {
+  const { token, platform } = req.body || {};
+  if (!token || typeof token !== 'string') {
+    return res.status(400).json({ success: false, message: 'token is required' });
+  }
+  await fcmService.upsertToken(req.user.id, token, platform || 'android');
+  res.json({ success: true });
+});
+
+// Remove a specific FCM token (used on logout from the device).
+// Body: { token }
+export const removeFcmToken = asyncHandler(async (req, res) => {
+  const { token } = req.body || {};
+  if (!token) return res.status(400).json({ success: false, message: 'token is required' });
+  await fcmService.deleteToken(token);
+  res.json({ success: true });
 });
 
 // Get current user profile
