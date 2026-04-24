@@ -1,11 +1,26 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
 import { bustCache } from '../middlewares/cache.middleware.js';
+import fcmService from '../services/fcm.service.js';
 
 const bustSupervisionCache = () => {
   // Cache keys are `cache:{userId}:{siteId}:{originalUrl}` — need two
   // wildcards between `cache:` and the URL, otherwise the bust never matches.
   bustCache('cache:*:*:/api/supervision-tasks*');
+};
+
+// Fire-and-forget FCM helper (same pattern as chat/booking).
+const pushTaskNotification = (recipientIds, payload) => {
+  const ids = (recipientIds || []).filter(Boolean);
+  if (ids.length === 0) return;
+  setImmediate(async () => {
+    try {
+      const res = await fcmService.sendToUsers(ids, payload);
+      console.log(`[task] FCM push -> recipients=${ids.length} sent=${res?.sent ?? 0} failed=${res?.failed ?? 0} reason=${res?.reason ?? '-'}`);
+    } catch (e) {
+      console.error('[task] FCM notify failed:', e?.message || e);
+    }
+  });
 };
 
 // Normalize an attachment entry coming in from the client. We store a thin
@@ -60,7 +75,22 @@ export const createSupervisionTask = asyncHandler(async (req, res) => {
   );
 
   bustSupervisionCache();
-  res.status(201).json({ success: true, task: result.rows[0] });
+
+  // Notify the assigned supervisor on their device.
+  const newTask = result.rows[0];
+  pushTaskNotification([assigned_to], {
+    title: 'New task assigned',
+    body: (newTask?.title || title).slice(0, 140),
+    data: {
+      type: 'task',
+      action: 'assigned',
+      task_id: newTask?.id,
+      priority: newTask?.priority || 'MEDIUM',
+      route: '/supervision/tasks',
+    },
+  });
+
+  res.status(201).json({ success: true, task: newTask });
 });
 
 // ── GET ALL TASKS ─────────────────────────────────────────────────────────
@@ -180,7 +210,24 @@ export const updateSupervisionTask = asyncHandler(async (req, res) => {
       [newStatus, completedAt, JSON.stringify(proof), id]
     );
     bustSupervisionCache();
-    return res.json({ success: true, task: result.rows[0] });
+
+    // Notify the admin who created the task when status changes.
+    const updatedTask = result.rows[0];
+    if (task.assigned_by && updatedTask && updatedTask.status !== task.status) {
+      pushTaskNotification([task.assigned_by], {
+        title: updatedTask.status === 'COMPLETED' ? 'Task completed' : 'Task status changed',
+        body: `${updatedTask.title}: ${updatedTask.status}`,
+        data: {
+          type: 'task',
+          action: 'status_updated',
+          task_id: id,
+          new_status: updatedTask.status,
+          route: '/supervision/tasks',
+        },
+      });
+    }
+
+    return res.json({ success: true, task: updatedTask });
   }
 
   // Admin/Owner full update

@@ -7,6 +7,35 @@ import pool from '../config/db.js';
 import { bustCache } from '../middlewares/cache.middleware.js';
 import { randomUUID } from 'crypto';
 import { uploadMany } from '../utils/upload.js';
+import fcmService from '../services/fcm.service.js';
+
+// Fire-and-forget FCM helper. Runs after HTTP response so booking flow is
+// never blocked by notification delivery.
+const pushBookingNotification = (recipientIds, payload) => {
+  const ids = (recipientIds || []).filter(Boolean);
+  if (ids.length === 0) return;
+  setImmediate(async () => {
+    try {
+      const res = await fcmService.sendToUsers(ids, payload);
+      console.log(`[booking] FCM push -> recipients=${ids.length} sent=${res?.sent ?? 0} failed=${res?.failed ?? 0} reason=${res?.reason ?? '-'}`);
+    } catch (e) {
+      console.error('[booking] FCM notify failed:', e?.message || e);
+    }
+  });
+};
+
+// Resolve admins/owners at a site — used as approvers for booking requests.
+const getSiteApprovers = async (siteId) => {
+  if (!siteId) return [];
+  const q = await pool.query(
+    `SELECT id FROM users
+      WHERE is_active = true
+        AND role IN ('ADMIN', 'OWNER')
+        AND (site_id = $1 OR role = 'OWNER')`,
+    [siteId],
+  );
+  return q.rows.map((r) => r.id);
+};
 
 // Helper
 const getSiteId = async (userId, reqUser) => {
@@ -309,6 +338,21 @@ export const agentBookPlot = asyncHandler(async (req, res) => {
     bustCache('cache:*:/api/colony-maps*');
     bustCache('cache:*:/api/bookings*');
 
+    // Notify approvers (admins + owners) that a booking needs review.
+    const approverIds = await getSiteApprovers(siteId);
+    pushBookingNotification(approverIds, {
+      title: 'New booking request',
+      body: `${client_name} booked plot ${plot.plot_number || ''}`.trim(),
+      data: {
+        type: 'booking',
+        action: 'pending_approval',
+        booking_id: booking.id,
+        plot_number: plot.plot_number || '',
+        client_name: client_name || '',
+        route: '/bookings/approvals',
+      },
+    });
+
     res.status(201).json({ success: true, booking, message: 'Booking submitted for admin approval!' });
   } catch (err) {
     await dbClient.query('ROLLBACK');
@@ -366,6 +410,22 @@ export const approveBooking = asyncHandler(async (req, res) => {
     bustCache('cache:*:/api/dashboard*');
 
     const fullBooking = await plotBookingModel.findByIdFull(id, pool);
+
+    // Notify the agent/user who originally booked the plot.
+    if (booking.booked_by) {
+      pushBookingNotification([booking.booked_by], {
+        title: 'Booking approved',
+        body: `Plot ${fullBooking?.plot_number || ''} booked for ${booking.client_name || 'your client'} is now confirmed.`,
+        data: {
+          type: 'booking',
+          action: 'approved',
+          booking_id: id,
+          plot_number: fullBooking?.plot_number || '',
+          route: `/bookings/${id}`,
+        },
+      });
+    }
+
     res.json({ success: true, booking: fullBooking, message: 'Booking approved!' });
   } catch (err) {
     await dbClient.query('ROLLBACK');
