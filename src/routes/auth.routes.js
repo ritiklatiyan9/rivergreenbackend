@@ -14,6 +14,7 @@ import {
 	removeFcmToken,
 	sendTestPush,
 } from '../controllers/auth.controller.js';
+import { getMySidebarModules } from '../controllers/sidebarPermission.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import upload from '../middlewares/multer.middleware.js';
 
@@ -22,6 +23,7 @@ router.post('/login', login);
 router.post('/refresh', refresh);
 router.post('/logout', authMiddleware, logout);
 router.get('/me', authMiddleware, getMe);
+router.get('/sidebar-modules', authMiddleware, getMySidebarModules);
 router.get('/sites', authMiddleware, getAccessibleSites);
 router.put('/active-site', authMiddleware, setActiveSite);
 router.put('/profile', authMiddleware, upload.single('profile_photo'), updateProfile);

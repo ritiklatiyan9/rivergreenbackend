@@ -771,6 +771,26 @@ export const publicBookByLabel = asyncHandler(async (req, res) => {
     bustCache('cache:*:/api/colony-maps*');
     bustCache('cache:*:/api/bookings*');
 
+    // Notify admins/owners of this site that a public booking arrived.
+    const approverIds = await getSiteApprovers(resolvedSiteId);
+    const paid = !!razorpay_payment_id;
+    pushBookingNotification(approverIds, {
+      title: paid ? 'New paid booking (website)' : 'New website booking',
+      body: `${client_name} booked plot ${plot.plot_number || normalizedLabel}${paid ? ` — ₹${parsedBookingAmount} paid via Razorpay` : ''}`,
+      data: {
+        type: 'booking',
+        action: 'pending_approval',
+        booking_id: booking.id,
+        plot_number: plot.plot_number || normalizedLabel || '',
+        client_name: client_name || '',
+        client_phone: client_phone || '',
+        amount: String(parsedBookingAmount),
+        source: 'public_website',
+        razorpay_payment_id: razorpay_payment_id || '',
+        route: '/bookings/approvals',
+      },
+    });
+
     res.status(201).json({ success: true, booking, message: 'Booking submitted! Admin will verify and confirm.' });
   } catch (err) {
     await dbClient.query('ROLLBACK');
@@ -892,6 +912,26 @@ export const publicBookPlot = asyncHandler(async (req, res) => {
 
     bustCache('cache:*:/api/colony-maps*');
     bustCache('cache:*:/api/bookings*');
+
+    // Notify admins/owners of this site about the public booking.
+    const approverIds = await getSiteApprovers(plot.site_id);
+    const paid = !!razorpay_payment_id;
+    pushBookingNotification(approverIds, {
+      title: paid ? 'New paid booking (share link)' : 'New share-link booking',
+      body: `${client_name} booked plot ${plot.plot_number || ''}${paid ? ` — ₹${parsedBookingAmount} paid via Razorpay` : ''}`.trim(),
+      data: {
+        type: 'booking',
+        action: 'pending_approval',
+        booking_id: booking.id,
+        plot_number: plot.plot_number || '',
+        client_name: client_name || '',
+        client_phone: client_phone || '',
+        amount: String(parsedBookingAmount),
+        source: 'public_share_link',
+        razorpay_payment_id: razorpay_payment_id || '',
+        route: '/bookings/approvals',
+      },
+    });
 
     res.status(201).json({ success: true, booking, message: 'Booking submitted! Admin will verify and confirm.' });
   } catch (err) {
