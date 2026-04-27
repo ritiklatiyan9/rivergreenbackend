@@ -24,6 +24,26 @@ const pushBookingNotification = (recipientIds, payload) => {
   });
 };
 
+// Push fired specifically to the referring agent the moment their referral
+// code is used to create a booking — even before admin approval. This is what
+// agents actually want to see ("my code just brought in a sale").
+const pushReferralUsedNotification = ({ referrerId, clientName, plotNumber, colonyName, bookingId, amount }) => {
+  if (!referrerId) return;
+  pushBookingNotification([referrerId], {
+    title: 'Your referral was used',
+    body: `${clientName || 'A customer'} booked ${plotNumber ? `plot ${plotNumber}` : 'a plot'}${colonyName ? ` in ${colonyName}` : ''}${amount ? ` (₹${amount})` : ''} — pending admin approval.`,
+    data: {
+      type: 'booking',
+      action: 'referral_used',
+      booking_id: bookingId,
+      plot_number: plotNumber || '',
+      client_name: clientName || '',
+      colony_name: colonyName || '',
+      route: bookingId ? `/bookings/${bookingId}` : '/bookings',
+    },
+  });
+};
+
 // Resolve a colony's display name from its UUID. Cached per-call only.
 const getColonyName = async (colonyMapId) => {
   if (!colonyMapId) return '';
@@ -364,6 +384,18 @@ export const agentBookPlot = asyncHandler(async (req, res) => {
         route: '/bookings/approvals',
       },
     });
+
+    // Tell the referring agent immediately when they're not the booker themselves.
+    if (referredById && String(referredById) !== String(req.user.id)) {
+      pushReferralUsedNotification({
+        referrerId: referredById,
+        clientName: client_name,
+        plotNumber: plot.plot_number,
+        colonyName,
+        bookingId: booking.id,
+        amount: parsedBookingAmount,
+      });
+    }
 
     res.status(201).json({ success: true, booking, message: 'Booking submitted for admin approval!' });
   } catch (err) {
@@ -854,6 +886,16 @@ export const publicBookByLabel = asyncHandler(async (req, res) => {
       },
     });
 
+    // Notify the referring agent immediately when their code converted.
+    pushReferralUsedNotification({
+      referrerId: referredById,
+      clientName: client_name,
+      plotNumber: plot.plot_number || normalizedLabel,
+      colonyName: colonyNameNotif,
+      bookingId: booking.id,
+      amount: parsedBookingAmount,
+    });
+
     res.status(201).json({ success: true, booking, message: 'Booking submitted! Admin will verify and confirm.' });
   } catch (err) {
     await dbClient.query('ROLLBACK');
@@ -999,6 +1041,17 @@ export const publicBookPlot = asyncHandler(async (req, res) => {
         razorpay_payment_id: razorpay_payment_id || '',
         route: '/bookings/approvals',
       },
+    });
+
+    // Notify the referring agent immediately — they want to know their
+    // referral code converted, not wait for admin approval.
+    pushReferralUsedNotification({
+      referrerId: referredById,
+      clientName: client_name,
+      plotNumber: plot.plot_number,
+      colonyName: colonyNameNotif,
+      bookingId: booking.id,
+      amount: parsedBookingAmount,
     });
 
     res.status(201).json({ success: true, booking, message: 'Booking submitted! Admin will verify and confirm.' });
