@@ -3,6 +3,7 @@ const router = express.Router();
 
 import {
   getFinancialSettings,
+  listFinancialSettings,
   updateFinancialSettings,
   getPublicFinancialSettings,
 } from '../controllers/financialSettings.controller.js';
@@ -11,12 +12,13 @@ import checkRole from '../middlewares/role.middleware.js';
 import upload from '../middlewares/multer.middleware.js';
 import { cacheMiddleware } from '../middlewares/cache.middleware.js';
 
-// Public route — used by SharedPlot booking page
+// Public route — used by SharedPlot booking page and per-colony website maps
 router.get('/public/:siteId', cacheMiddleware(1800), getPublicFinancialSettings);
 
 // Admin routes
 router.use(authMiddleware, checkRole(['ADMIN']));
-router.get('/', cacheMiddleware(1800), getFinancialSettings);
+router.get('/list', cacheMiddleware(120), listFinancialSettings);
+router.get('/', cacheMiddleware(120), getFinancialSettings);
 router.put('/', upload.single('upi_scanner'), updateFinancialSettings);
 
 export default router;

@@ -16,15 +16,17 @@ const router = express.Router();
 
 router.use(authMiddleware);
 
-// Admin/Owner only
+const ASSIGNEE_ROLES = ['ADMIN', 'OWNER', 'SUPERVISOR', 'AGENT', 'TEAM_HEAD'];
+
+// Admin/Owner only — create, delete, fetch assignment list
 router.post('/', checkRole(['ADMIN', 'OWNER']), createSupervisionTask);
 router.delete('/:id', checkRole(['ADMIN', 'OWNER']), deleteSupervisionTask);
 router.get('/supervisors', checkRole(['ADMIN', 'OWNER']), getSupervisorsForAssignment);
 
-// Both Admin and Supervisor
-router.get('/', checkRole(['ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(60), getSupervisionTasks);
-router.get('/analytics', checkRole(['ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(60), getSupervisionAnalytics);
-router.get('/:id', checkRole(['ADMIN', 'OWNER', 'SUPERVISOR']), getSupervisionTask);
-router.put('/:id', checkRole(['ADMIN', 'OWNER', 'SUPERVISOR']), updateSupervisionTask);
+// Admin + every possible assignee role can read & update their own task
+router.get('/', checkRole(ASSIGNEE_ROLES), cacheMiddleware(60), getSupervisionTasks);
+router.get('/analytics', checkRole(ASSIGNEE_ROLES), cacheMiddleware(60), getSupervisionAnalytics);
+router.get('/:id', checkRole(ASSIGNEE_ROLES), getSupervisionTask);
+router.put('/:id', checkRole(ASSIGNEE_ROLES), updateSupervisionTask);
 
 export default router;

@@ -6,7 +6,7 @@ class ClientActivityModel extends MasterModel {
   }
 
   // Get activities with filters
-  async findWithDetails({ siteId, leadId, plotId, bookingId, activityType, status, assignedTo, dateFrom, dateTo, page = 1, limit = 20 }, pool) {
+  async findWithDetails({ siteId, leadId, plotId, bookingId, activityType, status, assignedTo, dateFrom, dateTo, colonyMapId, page = 1, limit = 20 }, pool) {
     const conditions = ['ca.site_id = $1'];
     const params = [siteId];
     let idx = 2;
@@ -43,11 +43,22 @@ class ClientActivityModel extends MasterModel {
       conditions.push(`ca.scheduled_at <= $${idx++}`);
       params.push(dateTo);
     }
+    if (colonyMapId) {
+      // An activity belongs to a colony if its linked plot or booking is in that colony
+      conditions.push(`(mp.colony_map_id = $${idx} OR pb.colony_map_id = $${idx})`);
+      params.push(colonyMapId);
+      idx++;
+    }
 
     const where = conditions.join(' AND ');
     const offset = (page - 1) * limit;
 
-    const countQuery = `SELECT COUNT(*) as total FROM ${this.tableName} ca WHERE ${where}`;
+    const countQuery = `
+      SELECT COUNT(*) as total FROM ${this.tableName} ca
+      LEFT JOIN map_plots mp ON ca.plot_id = mp.id
+      LEFT JOIN plot_bookings pb ON ca.booking_id = pb.id
+      WHERE ${where}
+    `;
     const countResult = await pool.query(countQuery, params);
     const total = parseInt(countResult.rows[0].total);
 
@@ -56,12 +67,15 @@ class ClientActivityModel extends MasterModel {
         l.name as lead_name, l.phone as lead_phone,
         mp.plot_number, mp.block,
         pb.client_name as booking_client_name,
+        COALESCE(mp.colony_map_id, pb.colony_map_id) as colony_map_id,
+        cm.name as colony_name,
         u_assigned.name as assigned_to_name,
         u_created.name as created_by_name
       FROM ${this.tableName} ca
       LEFT JOIN leads l ON ca.lead_id = l.id
       LEFT JOIN map_plots mp ON ca.plot_id = mp.id
       LEFT JOIN plot_bookings pb ON ca.booking_id = pb.id
+      LEFT JOIN colony_maps cm ON cm.id = COALESCE(mp.colony_map_id, pb.colony_map_id)
       LEFT JOIN users u_assigned ON ca.assigned_to = u_assigned.id
       LEFT JOIN users u_created ON ca.created_by = u_created.id
       WHERE ${where}
@@ -78,9 +92,20 @@ class ClientActivityModel extends MasterModel {
   }
 
   // Today's activities
-  async findToday(siteId, assignedTo, pool) {
-    const userFilter = assignedTo ? `AND ca.assigned_to = $2` : '';
-    const params = assignedTo ? [siteId, assignedTo] : [siteId];
+  async findToday(siteId, assignedTo, pool, colonyMapId = null) {
+    const params = [siteId];
+    let idx = 2;
+    let userFilter = '';
+    if (assignedTo) {
+      userFilter = ` AND ca.assigned_to = $${idx++}`;
+      params.push(assignedTo);
+    }
+    let colonyFilter = '';
+    if (colonyMapId) {
+      colonyFilter = ` AND (mp.colony_map_id = $${idx} OR pb.colony_map_id = $${idx})`;
+      params.push(colonyMapId);
+      idx++;
+    }
 
     const query = `
       SELECT ca.*,
@@ -90,10 +115,11 @@ class ClientActivityModel extends MasterModel {
       FROM ${this.tableName} ca
       LEFT JOIN leads l ON ca.lead_id = l.id
       LEFT JOIN map_plots mp ON ca.plot_id = mp.id
+      LEFT JOIN plot_bookings pb ON ca.booking_id = pb.id
       LEFT JOIN users u_assigned ON ca.assigned_to = u_assigned.id
       WHERE ca.site_id = $1
         AND ca.scheduled_at::date = CURRENT_DATE
-        ${userFilter}
+        ${userFilter}${colonyFilter}
       ORDER BY ca.scheduled_at ASC
     `;
     const result = await pool.query(query, params);
@@ -101,24 +127,37 @@ class ClientActivityModel extends MasterModel {
   }
 
   // Dashboard stats
-  async getStats(siteId, assignedTo, pool) {
-    const userFilter = assignedTo ? `AND assigned_to = $2` : '';
-    const params = assignedTo ? [siteId, assignedTo] : [siteId];
+  async getStats(siteId, assignedTo, pool, colonyMapId = null) {
+    const params = [siteId];
+    let idx = 2;
+    let userFilter = '';
+    if (assignedTo) {
+      userFilter = ` AND ca.assigned_to = $${idx++}`;
+      params.push(assignedTo);
+    }
+    let colonyFilter = '';
+    if (colonyMapId) {
+      colonyFilter = ` AND (mp.colony_map_id = $${idx} OR pb.colony_map_id = $${idx})`;
+      params.push(colonyMapId);
+      idx++;
+    }
 
     const query = `
       SELECT
         COUNT(*) as total_activities,
-        COUNT(*) FILTER (WHERE scheduled_at::date = CURRENT_DATE) as today,
-        COUNT(*) FILTER (WHERE status = 'SCHEDULED') as scheduled,
-        COUNT(*) FILTER (WHERE status = 'COMPLETED') as completed,
-        COUNT(*) FILTER (WHERE status = 'NO_SHOW') as no_shows,
-        COUNT(*) FILTER (WHERE activity_type = 'VISIT') as total_visits,
-        COUNT(*) FILTER (WHERE activity_type = 'MEETING') as total_meetings,
-        COUNT(*) FILTER (WHERE activity_type = 'PLOT_SHOWING') as total_showings,
-        COUNT(*) FILTER (WHERE activity_type IN ('CALL_INCOMING', 'CALL_OUTGOING')) as total_calls,
-        COUNT(*) FILTER (WHERE status = 'SCHEDULED' AND scheduled_at < NOW()) as overdue
-      FROM ${this.tableName}
-      WHERE site_id = $1 ${userFilter}
+        COUNT(*) FILTER (WHERE ca.scheduled_at::date = CURRENT_DATE) as today,
+        COUNT(*) FILTER (WHERE ca.status = 'SCHEDULED') as scheduled,
+        COUNT(*) FILTER (WHERE ca.status = 'COMPLETED') as completed,
+        COUNT(*) FILTER (WHERE ca.status = 'NO_SHOW') as no_shows,
+        COUNT(*) FILTER (WHERE ca.activity_type = 'VISIT') as total_visits,
+        COUNT(*) FILTER (WHERE ca.activity_type = 'MEETING') as total_meetings,
+        COUNT(*) FILTER (WHERE ca.activity_type = 'PLOT_SHOWING') as total_showings,
+        COUNT(*) FILTER (WHERE ca.activity_type IN ('CALL_INCOMING', 'CALL_OUTGOING')) as total_calls,
+        COUNT(*) FILTER (WHERE ca.status = 'SCHEDULED' AND ca.scheduled_at < NOW()) as overdue
+      FROM ${this.tableName} ca
+      LEFT JOIN map_plots mp ON ca.plot_id = mp.id
+      LEFT JOIN plot_bookings pb ON ca.booking_id = pb.id
+      WHERE ca.site_id = $1 ${userFilter}${colonyFilter}
     `;
     const result = await pool.query(query, params);
     return result.rows[0];

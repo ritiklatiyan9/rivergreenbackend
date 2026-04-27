@@ -42,6 +42,12 @@ const sanitizeAttachments = (list, userId) => {
   return list.map((a) => normalizeAttachment(a, userId)).filter(Boolean);
 };
 
+// Roles that can be assigned a supervision task (i.e. anyone non-admin who
+// reports to admin/owner — supervisors, agents, team heads).
+const ASSIGNABLE_ROLES = ['SUPERVISOR', 'AGENT', 'TEAM_HEAD'];
+const isAssignee = (role) => ASSIGNABLE_ROLES.includes(String(role || '').toUpperCase());
+const isPrivileged = (role) => ['ADMIN', 'OWNER'].includes(String(role || '').toUpperCase());
+
 // ── CREATE TASK (Admin assigns to Supervisor) ─────────────────────────────
 export const createSupervisionTask = asyncHandler(async (req, res) => {
   const { title, description, assigned_to, site_id, priority, due_date, admin_attachments } = req.body;
@@ -49,10 +55,10 @@ export const createSupervisionTask = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'Title and assigned supervisor are required' });
   }
 
-  // Verify assigned_to is a SUPERVISOR
+  // Verify assigned_to is an eligible assignee (supervisor, agent, team head)
   const supCheck = await pool.query('SELECT id, role FROM users WHERE id = $1', [assigned_to]);
-  if (!supCheck.rows.length || supCheck.rows[0].role !== 'SUPERVISOR') {
-    return res.status(400).json({ success: false, message: 'Assigned user is not a supervisor' });
+  if (!supCheck.rows.length || !isAssignee(supCheck.rows[0].role)) {
+    return res.status(400).json({ success: false, message: 'Assigned user must be a supervisor, agent, or team head' });
   }
 
   const cleanedAdminAttachments = sanitizeAttachments(admin_attachments, req.user.id);
@@ -100,8 +106,8 @@ export const getSupervisionTasks = asyncHandler(async (req, res) => {
 
   let query, params;
 
-  if (userRole === 'SUPERVISOR') {
-    // Supervisor sees only their tasks
+  if (!isPrivileged(userRole)) {
+    // Any non-admin assignee (supervisor / agent / team head) sees only their tasks
     query = `
       SELECT st.*,
              u_assigned.name AS assigned_to_name,
@@ -164,8 +170,8 @@ export const getSupervisionTask = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: 'Task not found' });
   }
 
-  // Supervisors can only see their own tasks
-  if (req.user.role === 'SUPERVISOR' && result.rows[0].assigned_to !== req.user.id) {
+  // Non-admin assignees can only see their own tasks
+  if (!isPrivileged(req.user.role) && result.rows[0].assigned_to !== req.user.id) {
     return res.status(403).json({ success: false, message: 'Access denied' });
   }
 
@@ -188,8 +194,8 @@ export const updateSupervisionTask = asyncHandler(async (req, res) => {
 
   const task = existing.rows[0];
 
-  // Supervisors can only update status + proof_attachments on their own tasks
-  if (req.user.role === 'SUPERVISOR') {
+  // Non-admin assignees can only update status + proof_attachments on their own tasks
+  if (!isPrivileged(req.user.role)) {
     if (task.assigned_to !== req.user.id) {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
@@ -285,8 +291,8 @@ export const getSupervisionAnalytics = asyncHandler(async (req, res) => {
   const userRole = req.user.role;
   const userId = req.user.id;
 
-  if (userRole === 'SUPERVISOR') {
-    // Supervisor sees only their own analytics
+  if (!isPrivileged(userRole)) {
+    // Non-admin assignees see only their own analytics
     const stats = await pool.query(
       `SELECT
          COUNT(*) AS total,
@@ -377,10 +383,22 @@ export const getSupervisionAnalytics = asyncHandler(async (req, res) => {
   });
 });
 
-// ── GET SUPERVISORS LIST (for assignment dropdown) ────────────────────────
+// ── GET ASSIGNEE LIST (for assignment dropdown) ────────────────────────
+// Returns all eligible task assignees: supervisors + agents + team heads.
+// Optional `?roles=AGENT,SUPERVISOR` query narrows the result.
 export const getSupervisorsForAssignment = asyncHandler(async (req, res) => {
+  const requested = String(req.query.roles || '')
+    .split(',')
+    .map((r) => r.trim().toUpperCase())
+    .filter((r) => ASSIGNABLE_ROLES.includes(r));
+  const roles = requested.length ? requested : ASSIGNABLE_ROLES;
+
   const result = await pool.query(
-    `SELECT id, name, email FROM users WHERE role = 'SUPERVISOR' AND is_active = true ORDER BY name`
+    `SELECT id, name, email, role
+       FROM users
+      WHERE role = ANY($1::text[]) AND is_active = true
+      ORDER BY role, name`,
+    [roles]
   );
-  res.json({ success: true, supervisors: result.rows });
+  res.json({ success: true, supervisors: result.rows, assignees: result.rows });
 });

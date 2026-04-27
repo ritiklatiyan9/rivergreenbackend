@@ -7,7 +7,7 @@ class ClientModel extends MasterModel {
 
   // List clients (bookings with client info or completed/active bookings)
   // and ef
-  async findClients({ siteId, search, status, page = 1, limit = 20 }, pool) {
+  async findClients({ siteId, search, status, colonyMapId, page = 1, limit = 20 }, pool) {
     const conditions = ['pb.site_id = $1'];
     const params = [siteId];
     let idx = 2;
@@ -24,6 +24,11 @@ class ClientModel extends MasterModel {
       conditions.push(`(pb.client_name ILIKE $${idx} OR pb.client_phone ILIKE $${idx} OR mp.plot_number::text ILIKE $${idx})`);
       params.push(`%${search}%`);
       idx++;
+    }
+
+    if (colonyMapId) {
+      conditions.push(`pb.colony_map_id = $${idx++}`);
+      params.push(colonyMapId);
     }
 
     const where = conditions.join(' AND ');

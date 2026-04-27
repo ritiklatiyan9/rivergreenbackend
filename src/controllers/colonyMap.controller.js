@@ -29,6 +29,51 @@ export const uploadMapImage = async (req, res) => {
 export const getColonyMaps = async (req, res) => {
     try {
         const maps = await ColonyMap.findBySite(req.user.site_id, pool);
+
+        // Optional: include per-colony analytics blob for the colony picker.
+        // Triggered with ?with_stats=1.
+        if (req.query.with_stats === '1' && maps.length > 0) {
+            const ids = maps.map(m => m.id);
+            const statsQ = await pool.query(
+                `SELECT cm.id AS colony_id,
+                        COUNT(DISTINCT pb.id)                                                  AS total_bookings,
+                        COUNT(DISTINCT pb.id) FILTER (WHERE pb.status = 'PENDING_APPROVAL')    AS pending_approvals,
+                        COUNT(DISTINCT pb.id) FILTER (WHERE pb.status = 'ACTIVE')              AS active_bookings,
+                        COUNT(DISTINCT pb.id) FILTER (WHERE pb.status = 'COMPLETED')           AS completed_bookings,
+                        COUNT(DISTINCT pb.id) FILTER (WHERE pb.status = 'CANCELLED')           AS cancelled_bookings,
+                        COUNT(DISTINCT mp.id)                                                  AS plot_count,
+                        COUNT(DISTINCT mp.id) FILTER (WHERE mp.status = 'AVAILABLE')           AS plots_available,
+                        COUNT(DISTINCT mp.id) FILTER (WHERE mp.status = 'RESERVED')            AS plots_reserved,
+                        COUNT(DISTINCT mp.id) FILTER (WHERE mp.status = 'SOLD')                AS plots_sold,
+                        COALESCE(SUM(p.amount) FILTER (WHERE p.status = 'COMPLETED'), 0)       AS total_collected,
+                        COALESCE(SUM(p.amount) FILTER (WHERE p.status = 'PENDING'), 0)         AS total_pending
+                 FROM colony_maps cm
+                 LEFT JOIN map_plots mp        ON mp.colony_map_id = cm.id
+                 LEFT JOIN plot_bookings pb    ON pb.colony_map_id = cm.id
+                 LEFT JOIN payments p          ON p.booking_id = pb.id
+                 WHERE cm.id = ANY($1::uuid[])
+                 GROUP BY cm.id`,
+                [ids]
+            );
+            const byId = Object.fromEntries(statsQ.rows.map(r => [r.colony_id, r]));
+            maps.forEach(m => {
+                const s = byId[m.id];
+                m.stats = s ? {
+                    total_bookings: Number(s.total_bookings),
+                    pending_approvals: Number(s.pending_approvals),
+                    active_bookings: Number(s.active_bookings),
+                    completed_bookings: Number(s.completed_bookings),
+                    cancelled_bookings: Number(s.cancelled_bookings),
+                    plot_count: Number(s.plot_count),
+                    plots_available: Number(s.plots_available),
+                    plots_reserved: Number(s.plots_reserved),
+                    plots_sold: Number(s.plots_sold),
+                    total_collected: Number(s.total_collected),
+                    total_pending: Number(s.total_pending),
+                } : null;
+            });
+        }
+
         res.json({ success: true, maps });
     } catch (err) {
         console.error('getColonyMaps error:', err);
@@ -354,14 +399,23 @@ export const getPublicSitePlots = async (req, res) => {
             siteId = siteRes.rows[0].id;
         }
 
+        const { colony_name } = req.query;
+        const params = [siteId];
+        let colonyFilter = '';
+        if (colony_name) {
+            // Case-insensitive exact match so "Defence Garden Phase 2" finds its own plots only
+            colonyFilter = ' AND LOWER(cm.name) = LOWER($2)';
+            params.push(String(colony_name));
+        }
+
         const plotsRes = await pool.query(
             `SELECT mp.id, mp.plot_number, mp.status, mp.area_sqft, mp.dimensions,
                     mp.facing, mp.total_price, mp.price_per_sqft, mp.block, mp.plot_type,
-                    mp.colony_map_id
+                    mp.colony_map_id, cm.name as colony_name
              FROM map_plots mp
              JOIN colony_maps cm ON mp.colony_map_id = cm.id
-             WHERE cm.site_id = $1`,
-            [siteId]
+             WHERE cm.site_id = $1${colonyFilter}`,
+            params
         );
 
         let financialSettings = null;

@@ -6,7 +6,7 @@ class PlotBookingModel extends MasterModel {
   }
 
   // Get all bookings for a site with joined data
-  async findBySite({ siteId, status, plotId, bookedBy, page = 1, limit = 20 }, pool) {
+  async findBySite({ siteId, status, plotId, bookedBy, bookedByOrReferred, colonyMapId, page = 1, limit = 20 }, pool) {
     const conditions = ['pb.site_id = $1'];
     const params = [siteId];
     let idx = 2;
@@ -19,9 +19,17 @@ class PlotBookingModel extends MasterModel {
       conditions.push(`pb.plot_id = $${idx++}`);
       params.push(plotId);
     }
-    if (bookedBy) {
+    if (bookedByOrReferred) {
+      conditions.push(`(pb.booked_by = $${idx} OR pb.referred_by = $${idx})`);
+      params.push(bookedByOrReferred);
+      idx++;
+    } else if (bookedBy) {
       conditions.push(`pb.booked_by = $${idx++}`);
       params.push(bookedBy);
+    }
+    if (colonyMapId) {
+      conditions.push(`pb.colony_map_id = $${idx++}`);
+      params.push(colonyMapId);
     }
 
     const where = conditions.join(' AND ');
@@ -111,12 +119,21 @@ class PlotBookingModel extends MasterModel {
   }
 
   // Dashboard stats
-  async getStats(siteId, pool, bookedBy = null) {
+  async getStats(siteId, pool, bookedBy = null, colonyMapId = null, bookedByOrReferred = null) {
     const params = [siteId];
     let whereClause = 'site_id = $1';
-    if (bookedBy) {
-      whereClause += ` AND booked_by = $2`;
+    let idx = 2;
+    if (bookedByOrReferred) {
+      whereClause += ` AND (booked_by = $${idx} OR referred_by = $${idx})`;
+      params.push(bookedByOrReferred);
+      idx++;
+    } else if (bookedBy) {
+      whereClause += ` AND booked_by = $${idx++}`;
       params.push(bookedBy);
+    }
+    if (colonyMapId) {
+      whereClause += ` AND colony_map_id = $${idx++}`;
+      params.push(colonyMapId);
     }
     const query = `
       SELECT

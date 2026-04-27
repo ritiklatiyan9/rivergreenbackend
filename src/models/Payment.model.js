@@ -22,14 +22,18 @@ class PaymentModel extends MasterModel {
   }
 
   // Get all payments for a site with filters
-  async findBySite({ siteId, assignedTo, status, paymentType, dateFrom, dateTo, page = 1, limit = 20 }, pool) {
+  async findBySite({ siteId, assignedTo, status, paymentType, dateFrom, dateTo, colonyMapId, page = 1, limit = 20 }, pool) {
     const conditions = ['p.site_id = $1'];
     const params = [siteId];
     let idx = 2;
 
-    // When an agent requests, scope to their own bookings/payments only
+    // When an agent requests, scope to payments tied to their referral code:
+    // bookings they booked OR were referred via them, plus standalone payments they created.
     if (assignedTo) {
-      conditions.push(`(p.booking_id IS NOT NULL AND pb.booked_by = $${idx} OR p.booking_id IS NULL AND p.created_by = $${idx})`);
+      conditions.push(`(
+        (p.booking_id IS NOT NULL AND (pb.booked_by = $${idx} OR pb.referred_by = $${idx}))
+        OR (p.booking_id IS NULL AND p.created_by = $${idx})
+      )`);
       params.push(assignedTo);
       idx++;
     }
@@ -49,6 +53,12 @@ class PaymentModel extends MasterModel {
       conditions.push(`p.payment_date <= $${idx++}`);
       params.push(dateTo);
     }
+    if (colonyMapId) {
+      // Match either via the booking's colony or the plot's colony
+      conditions.push(`(pb.colony_map_id = $${idx} OR mp.colony_map_id = $${idx})`);
+      params.push(colonyMapId);
+      idx++;
+    }
 
     const where = conditions.join(' AND ');
     const offset = (page - 1) * limit;
@@ -56,6 +66,7 @@ class PaymentModel extends MasterModel {
     const countQuery = `
       SELECT COUNT(*) as total FROM ${this.tableName} p
       LEFT JOIN plot_bookings pb ON p.booking_id = pb.id
+      LEFT JOIN map_plots mp ON p.plot_id = mp.id
       WHERE ${where}
     `;
     const countResult = await pool.query(countQuery, params);
@@ -107,7 +118,13 @@ class PaymentModel extends MasterModel {
   }
 
   // Get overdue payments
-  async findOverdue(siteId, pool) {
+  async findOverdue(siteId, pool, colonyMapId = null) {
+    const params = [siteId];
+    let extra = '';
+    if (colonyMapId) {
+      params.push(colonyMapId);
+      extra = ` AND (pb.colony_map_id = $2 OR mp.colony_map_id = $2)`;
+    }
     const query = `
       SELECT p.*,
         pb.client_name, pb.client_phone,
@@ -117,20 +134,30 @@ class PaymentModel extends MasterModel {
       LEFT JOIN plot_bookings pb ON p.booking_id = pb.id
       LEFT JOIN map_plots mp ON p.plot_id = mp.id
       LEFT JOIN colony_maps cm ON mp.colony_map_id = cm.id
-      WHERE p.site_id = $1 AND p.status = 'PENDING' AND p.due_date < CURRENT_DATE
+      WHERE p.site_id = $1 AND p.status = 'PENDING' AND p.due_date < CURRENT_DATE${extra}
       ORDER BY p.due_date ASC
     `;
-    const result = await pool.query(query, [siteId]);
+    const result = await pool.query(query, params);
     return result.rows;
   }
 
   // Dashboard stats
-  async getStats(siteId, pool, assignedTo = null) {
+  async getStats(siteId, pool, assignedTo = null, colonyMapId = null) {
     let whereClause = 'p.site_id = $1';
     const params = [siteId];
+    let idx = 2;
     if (assignedTo) {
-      whereClause += ` AND (p.booking_id IS NOT NULL AND pb.booked_by = $2 OR p.booking_id IS NULL AND p.created_by = $2)`;
+      whereClause += ` AND (
+        (p.booking_id IS NOT NULL AND (pb.booked_by = $${idx} OR pb.referred_by = $${idx}))
+        OR (p.booking_id IS NULL AND p.created_by = $${idx})
+      )`;
       params.push(assignedTo);
+      idx++;
+    }
+    if (colonyMapId) {
+      whereClause += ` AND (pb.colony_map_id = $${idx} OR mp.colony_map_id = $${idx})`;
+      params.push(colonyMapId);
+      idx++;
     }
     const query = `
       SELECT
@@ -143,6 +170,7 @@ class PaymentModel extends MasterModel {
         COUNT(*) FILTER (WHERE p.status = 'COMPLETED' AND p.payment_date >= CURRENT_DATE - INTERVAL '7 days') as this_week_payments
       FROM ${this.tableName} p
       LEFT JOIN plot_bookings pb ON p.booking_id = pb.id
+      LEFT JOIN map_plots mp ON p.plot_id = mp.id
       WHERE ${whereClause}
     `;
     const result = await pool.query(query, params);

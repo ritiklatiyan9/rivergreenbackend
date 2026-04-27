@@ -10,6 +10,11 @@ class TaskModel extends MasterModel {
         let params = [siteId];
         let paramIndex = 2;
 
+        if (filters.created_by) {
+            whereClauses.push(`t.created_by = $${paramIndex++}`);
+            params.push(filters.created_by);
+        }
+
         if (filters.status) {
             whereClauses.push(`t.status = $${paramIndex++}`);
             params.push(filters.status);
@@ -66,7 +71,13 @@ class TaskModel extends MasterModel {
         return result.rows;
     }
 
-    async getStats(siteId, pool) {
+    async getStats(siteId, pool, createdBy = null) {
+        const params = [siteId];
+        let createdByClause = '';
+        if (createdBy) {
+            params.push(createdBy);
+            createdByClause = ' AND created_by = $2';
+        }
         const query = `
             SELECT
                 COUNT(*) FILTER (WHERE status = 'TODO')::int as todo_count,
@@ -78,9 +89,9 @@ class TaskModel extends MasterModel {
                 COUNT(*) FILTER (WHERE status = 'DONE' AND completed_at >= NOW() - INTERVAL '7 days')::int as completed_this_week,
                 COUNT(*)::int as total_count
             FROM ${this.tableName}
-            WHERE site_id = $1
+            WHERE site_id = $1${createdByClause}
         `;
-        const result = await pool.query(query, [siteId]);
+        const result = await pool.query(query, params);
         return result.rows[0];
     }
 
@@ -115,13 +126,19 @@ class TaskModel extends MasterModel {
         return result.rows[0];
     }
 
-    async autoShiftOverdue(siteId, pool) {
+    async autoShiftOverdue(siteId, pool, createdBy = null) {
+        const params = [siteId];
+        let createdByClause = '';
+        if (createdBy) {
+            params.push(createdBy);
+            createdByClause = ' AND created_by = $2';
+        }
         // Find overdue tasks and shift them to today
         const overdueTasks = await pool.query(
             `SELECT id, current_due_date FROM ${this.tableName}
              WHERE site_id = $1 AND current_due_date < CURRENT_DATE
-             AND status NOT IN ('DONE', 'CANCELLED')`,
-            [siteId]
+             AND status NOT IN ('DONE', 'CANCELLED')${createdByClause}`,
+            params
         );
 
         const shifted = [];

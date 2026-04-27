@@ -6,6 +6,34 @@ import mapPlotModel from '../models/MapPlot.model.js';
 import userModel from '../models/User.model.js';
 import pool from '../config/db.js';
 import { bustCache } from '../middlewares/cache.middleware.js';
+import fcmService from '../services/fcm.service.js';
+
+// Fire-and-forget FCM helper. Notifies the agents tied to a booking that a
+// payment activity happened. Runs after the response so HTTP isn't blocked.
+const pushPaymentNotification = (bookingId, payload) => {
+  if (!bookingId) return;
+  setImmediate(async () => {
+    try {
+      const r = await pool.query(
+        'SELECT booked_by, referred_by FROM plot_bookings WHERE id = $1',
+        [bookingId]
+      );
+      const row = r.rows[0];
+      if (!row) return;
+      const ids = [...new Set([row.booked_by, row.referred_by].filter(Boolean))];
+      if (!ids.length) return;
+      const res = await fcmService.sendToUsers(ids, payload);
+      console.log(`[payment] FCM push -> recipients=${ids.length} sent=${res?.sent ?? 0} failed=${res?.failed ?? 0} reason=${res?.reason ?? '-'}`);
+    } catch (e) {
+      console.error('[payment] FCM notify failed:', e?.message || e);
+    }
+  });
+};
+
+const fmtINR = (n) => {
+  const v = Number(n) || 0;
+  return `₹${v.toLocaleString('en-IN')}`;
+};
 
 /**
  * GET /api/payments/verify-receipt?token=...
@@ -237,6 +265,21 @@ export const recordPayment = asyncHandler(async (req, res) => {
   bustCache('cache:*:/api/payments*');
   bustCache('cache:*:/api/bookings*');
 
+  // Notify the agents tied to this booking that a payment has been recorded.
+  if (booking_id && payment?.status === 'COMPLETED') {
+    pushPaymentNotification(booking_id, {
+      title: 'Payment received',
+      body: `${fmtINR(payment.amount)} recorded for ${booking.client_name || 'a booking'}.`,
+      data: {
+        type: 'payment',
+        action: 'recorded',
+        booking_id,
+        payment_id: payment.id,
+        route: `/bookings/${booking_id}`,
+      },
+    });
+  }
+
   res.status(201).json({ success: true, payment });
 });
 
@@ -277,6 +320,21 @@ export const updatePayment = asyncHandler(async (req, res) => {
   bustCache('cache:*:/api/payments*');
   bustCache('cache:*:/api/bookings*');
 
+  // Notify when a payment moves to COMPLETED so the agent's "My Sales" reflects fast.
+  if (updated?.booking_id && existing.status !== 'COMPLETED' && updated.status === 'COMPLETED') {
+    pushPaymentNotification(updated.booking_id, {
+      title: 'Payment confirmed',
+      body: `${fmtINR(updated.amount)} was marked completed.`,
+      data: {
+        type: 'payment',
+        action: 'confirmed',
+        booking_id: updated.booking_id,
+        payment_id: updated.id,
+        route: `/bookings/${updated.booking_id}`,
+      },
+    });
+  }
+
   res.json({ success: true, payment: updated });
 });
 
@@ -287,10 +345,11 @@ export const getPayments = asyncHandler(async (req, res) => {
   const siteId = await getSiteId(req.user.id, req.user);
   if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
-  const { page, limit, status, payment_type, date_from, date_to } = req.query;
+  const { page, limit, status, payment_type, date_from, date_to, colony_map_id } = req.query;
 
-  // Agents can only see payments from their own bookings
-  const assignedTo = req.user.role === 'AGENT' ? req.user.id : null;
+  // Agents and team heads can only see payments tied to their referral code
+  const role = String(req.user.role || '').toUpperCase();
+  const assignedTo = (role === 'AGENT' || role === 'TEAM_HEAD') ? req.user.id : null;
 
   const result = await paymentModel.findBySite({
     siteId,
@@ -299,6 +358,7 @@ export const getPayments = asyncHandler(async (req, res) => {
     paymentType: payment_type,
     dateFrom: date_from,
     dateTo: date_to,
+    colonyMapId: colony_map_id || undefined,
     page: parseInt(page) || 1,
     limit: parseInt(limit) || 20,
   }, pool);
@@ -323,7 +383,8 @@ export const getOverduePayments = asyncHandler(async (req, res) => {
   const siteId = await getSiteId(req.user.id, req.user);
   if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
-  const payments = await paymentModel.findOverdue(siteId, pool);
+  const { colony_map_id } = req.query;
+  const payments = await paymentModel.findOverdue(siteId, pool, colony_map_id || null);
   res.json({ success: true, payments });
 });
 
@@ -334,10 +395,12 @@ export const getPaymentStats = asyncHandler(async (req, res) => {
   const siteId = await getSiteId(req.user.id, req.user);
   if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
-  // Agents see only their own stats
-  const assignedTo = req.user.role === 'AGENT' ? req.user.id : null;
+  // Agents and team heads see only stats for payments tied to their referral code
+  const role = String(req.user.role || '').toUpperCase();
+  const assignedTo = (role === 'AGENT' || role === 'TEAM_HEAD') ? req.user.id : null;
 
-  const stats = await paymentModel.getStats(siteId, pool, assignedTo);
+  const { colony_map_id } = req.query;
+  const stats = await paymentModel.getStats(siteId, pool, assignedTo, colony_map_id || null);
   res.json({ success: true, stats });
 });
 

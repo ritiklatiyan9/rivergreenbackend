@@ -4,27 +4,64 @@ import asyncHandler from '../utils/asyncHandler.js';
 import financialSettingsModel from '../models/FinancialSettings.model.js';
 import pool from '../config/db.js';
 
-// Helper: resolve Razorpay keys — DB settings take priority, env vars as fallback
-const getKeyPair = async (siteId) => {
-  const settings = await financialSettingsModel.findBySite(siteId, pool);
-  const key_id = settings?.razorpay_key_id || process.env.RAZORPAY_KEY_ID;
-  const key_secret = settings?.razorpay_key_secret || process.env.RAZORPAY_KEY_SECRET;
-  if (!key_id || !key_secret) return null;
-  return { key_id, key_secret, default_booking_amount: settings?.default_booking_amount };
+// Resolve the human-readable site identifier ("1", "2", or a UUID) → site UUID.
+const resolveSiteId = async (rawSiteId) => {
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (uuidRegex.test(rawSiteId)) return rawSiteId;
+  const idx = parseInt(rawSiteId, 10);
+  if (isNaN(idx) || idx < 1) return null;
+  const r = await pool.query(
+    'SELECT id FROM sites ORDER BY created_at ASC LIMIT 1 OFFSET $1',
+    [idx - 1]
+  );
+  return r.rows[0]?.id || null;
 };
 
-// Helper: get Razorpay instance for a site
-const getRazorpayInstance = async (siteId) => {
-  const keys = await getKeyPair(siteId);
-  if (!keys) return null;
-  return new Razorpay({ key_id: keys.key_id, key_secret: keys.key_secret });
+// Resolve a colony name within a site → colony_map_id (or null if not found).
+const resolveColonyByName = async (siteId, colonyName) => {
+  if (!colonyName) return null;
+  const r = await pool.query(
+    'SELECT id FROM colony_maps WHERE site_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1',
+    [siteId, String(colonyName).trim()]
+  );
+  return r.rows[0]?.id || null;
+};
+
+// Resolve effective Razorpay keys for (siteId, colonyMapId): per-colony first,
+// then site-wide default, then env fallback. Fallback is per-field, not per-row —
+// a per-colony row may set only `default_booking_amount` and inherit the site's
+// razorpay keys (or vice versa). The admin UI promises this behaviour.
+const getKeyPair = async (siteId, colonyMapId = null) => {
+  const colonyRow = colonyMapId
+    ? await financialSettingsModel.findByColony(siteId, colonyMapId, pool)
+    : null;
+  const siteRow = await financialSettingsModel.findBySite(siteId, pool);
+
+  const key_id =
+    colonyRow?.razorpay_key_id ||
+    siteRow?.razorpay_key_id ||
+    process.env.RAZORPAY_KEY_ID;
+  const key_secret =
+    colonyRow?.razorpay_key_secret ||
+    siteRow?.razorpay_key_secret ||
+    process.env.RAZORPAY_KEY_SECRET;
+  if (!key_id || !key_secret) return null;
+
+  // Booking amount: prefer per-colony if it's a positive number, else site default.
+  const colonyAmt = parseFloat(colonyRow?.default_booking_amount);
+  const siteAmt = parseFloat(siteRow?.default_booking_amount);
+  const default_booking_amount =
+    colonyAmt > 0 ? colonyAmt : (siteAmt > 0 ? siteAmt : 0);
+
+  return { key_id, key_secret, default_booking_amount };
 };
 
 // ============================================================
-// CREATE RAZORPAY ORDER (public — for website booking)
+// CREATE RAZORPAY ORDER (public)
+//   body: site_id, amount, plot_label, client_name, client_phone, [colony_name]
 // ============================================================
 export const createRazorpayOrder = asyncHandler(async (req, res) => {
-  const { site_id, amount, plot_label, client_name, client_phone } = req.body;
+  const { site_id, amount, plot_label, client_name, client_phone, colony_name } = req.body;
 
   if (!site_id || !amount || Number(amount) <= 0) {
     return res.status(400).json({ success: false, message: 'Site ID and valid amount are required' });
@@ -33,31 +70,17 @@ export const createRazorpayOrder = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'Client name and phone are required' });
   }
 
-  // Resolve site_id (numeric index or UUID)
-  let resolvedSiteId = site_id;
-  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  if (!uuidRegex.test(resolvedSiteId)) {
-    const idx = parseInt(resolvedSiteId, 10);
-    if (isNaN(idx) || idx < 1) {
-      return res.status(400).json({ success: false, message: 'Invalid site identifier' });
-    }
-    const siteRes = await pool.query(
-      'SELECT id FROM sites ORDER BY created_at ASC LIMIT 1 OFFSET $1',
-      [idx - 1]
-    );
-    if (siteRes.rows.length === 0) {
-      return res.status(404).json({ success: false, message: 'Site not found' });
-    }
-    resolvedSiteId = siteRes.rows[0].id;
-  }
+  const resolvedSiteId = await resolveSiteId(site_id);
+  if (!resolvedSiteId) return res.status(404).json({ success: false, message: 'Site not found' });
 
-  const keys = await getKeyPair(resolvedSiteId);
+  const colonyMapId = await resolveColonyByName(resolvedSiteId, colony_name);
+
+  const keys = await getKeyPair(resolvedSiteId, colonyMapId);
   if (!keys) {
-    return res.status(400).json({ success: false, message: 'Payment gateway not configured for this site' });
+    return res.status(400).json({ success: false, message: 'Payment gateway not configured for this colony' });
   }
 
   const razorpay = new Razorpay({ key_id: keys.key_id, key_secret: keys.key_secret });
-
   const amountInPaise = Math.round(Number(amount) * 100);
 
   const order = await razorpay.orders.create({
@@ -66,6 +89,8 @@ export const createRazorpayOrder = asyncHandler(async (req, res) => {
     receipt: `plot_${(plot_label || 'unknown').replace(/[^a-zA-Z0-9]/g, '')}_${Date.now()}`,
     notes: {
       site_id: resolvedSiteId,
+      colony_map_id: colonyMapId || '',
+      colony_name: colony_name || '',
       plot_label: plot_label || '',
       client_name,
       client_phone,
@@ -83,41 +108,26 @@ export const createRazorpayOrder = asyncHandler(async (req, res) => {
 
 // ============================================================
 // VERIFY RAZORPAY PAYMENT (public — after checkout completes)
+//   body: razorpay_order_id, razorpay_payment_id, razorpay_signature, site_id, [colony_name]
 // ============================================================
 export const verifyRazorpayPayment = asyncHandler(async (req, res) => {
   const {
     razorpay_order_id, razorpay_payment_id, razorpay_signature,
-    site_id,
+    site_id, colony_name,
   } = req.body;
 
   if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature || !site_id) {
     return res.status(400).json({ success: false, message: 'Missing payment verification data' });
   }
 
-  // Resolve site_id
-  let resolvedSiteId = site_id;
-  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  if (!uuidRegex.test(resolvedSiteId)) {
-    const idx = parseInt(resolvedSiteId, 10);
-    if (isNaN(idx) || idx < 1) {
-      return res.status(400).json({ success: false, message: 'Invalid site identifier' });
-    }
-    const siteRes = await pool.query(
-      'SELECT id FROM sites ORDER BY created_at ASC LIMIT 1 OFFSET $1',
-      [idx - 1]
-    );
-    if (siteRes.rows.length === 0) {
-      return res.status(404).json({ success: false, message: 'Site not found' });
-    }
-    resolvedSiteId = siteRes.rows[0].id;
-  }
+  const resolvedSiteId = await resolveSiteId(site_id);
+  if (!resolvedSiteId) return res.status(404).json({ success: false, message: 'Site not found' });
 
-  const keys = await getKeyPair(resolvedSiteId);
-  if (!keys) {
-    return res.status(400).json({ success: false, message: 'Payment gateway not configured' });
-  }
+  const colonyMapId = await resolveColonyByName(resolvedSiteId, colony_name);
 
-  // Verify signature using HMAC SHA256
+  const keys = await getKeyPair(resolvedSiteId, colonyMapId);
+  if (!keys) return res.status(400).json({ success: false, message: 'Payment gateway not configured' });
+
   const expectedSignature = crypto
     .createHmac('sha256', keys.key_secret)
     .update(`${razorpay_order_id}|${razorpay_payment_id}`)
@@ -136,33 +146,18 @@ export const verifyRazorpayPayment = asyncHandler(async (req, res) => {
 });
 
 // ============================================================
-// GET PUBLIC CONFIG (returns key_id + default_booking_amount — public safe)
+// GET PUBLIC CONFIG
+//   GET /razorpay/config/:siteId?colony_name=Defence%20Garden%20Phase%202
 // ============================================================
 export const getPublicRazorpayConfig = asyncHandler(async (req, res) => {
   const { siteId } = req.params;
-  if (!siteId) {
-    return res.status(400).json({ success: false, message: 'Site ID is required' });
-  }
+  if (!siteId) return res.status(400).json({ success: false, message: 'Site ID is required' });
 
-  // Resolve site_id
-  let resolvedSiteId = siteId;
-  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  if (!uuidRegex.test(resolvedSiteId)) {
-    const idx = parseInt(resolvedSiteId, 10);
-    if (isNaN(idx) || idx < 1) {
-      return res.status(400).json({ success: false, message: 'Invalid site identifier' });
-    }
-    const siteRes = await pool.query(
-      'SELECT id FROM sites ORDER BY created_at ASC LIMIT 1 OFFSET $1',
-      [idx - 1]
-    );
-    if (siteRes.rows.length === 0) {
-      return res.status(404).json({ success: false, message: 'Site not found' });
-    }
-    resolvedSiteId = siteRes.rows[0].id;
-  }
+  const resolvedSiteId = await resolveSiteId(siteId);
+  if (!resolvedSiteId) return res.status(404).json({ success: false, message: 'Site not found' });
 
-  const keys = await getKeyPair(resolvedSiteId);
+  const colonyMapId = await resolveColonyByName(resolvedSiteId, req.query.colony_name);
+  const keys = await getKeyPair(resolvedSiteId, colonyMapId);
 
   res.json({
     success: true,

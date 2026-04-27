@@ -20,6 +20,7 @@ export const getClients = asyncHandler(async (req, res) => {
     siteId,
     search: req.query.search,
     status: req.query.status,
+    colonyMapId: req.query.colony_map_id || undefined,
     page,
     limit,
   };

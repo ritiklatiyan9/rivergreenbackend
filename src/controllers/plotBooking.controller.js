@@ -24,6 +24,15 @@ const pushBookingNotification = (recipientIds, payload) => {
   });
 };
 
+// Resolve a colony's display name from its UUID. Cached per-call only.
+const getColonyName = async (colonyMapId) => {
+  if (!colonyMapId) return '';
+  try {
+    const r = await pool.query('SELECT name FROM colony_maps WHERE id = $1', [colonyMapId]);
+    return r.rows[0]?.name || '';
+  } catch { return ''; }
+};
+
 // Resolve admins/owners at a site — used as approvers for booking requests.
 const getSiteApprovers = async (siteId) => {
   if (!siteId) return [];
@@ -340,15 +349,18 @@ export const agentBookPlot = asyncHandler(async (req, res) => {
 
     // Notify approvers (admins + owners) that a booking needs review.
     const approverIds = await getSiteApprovers(siteId);
+    const colonyName = await getColonyName(plot.colony_map_id);
     pushBookingNotification(approverIds, {
       title: 'New booking request',
-      body: `${client_name} booked plot ${plot.plot_number || ''}`.trim(),
+      body: `${client_name} booked plot ${plot.plot_number || ''}${colonyName ? ` in ${colonyName}` : ''}`.trim(),
       data: {
         type: 'booking',
         action: 'pending_approval',
         booking_id: booking.id,
         plot_number: plot.plot_number || '',
         client_name: client_name || '',
+        colony_name: colonyName,
+        colony_map_id: plot.colony_map_id || '',
         route: '/bookings/approvals',
       },
     });
@@ -411,16 +423,21 @@ export const approveBooking = asyncHandler(async (req, res) => {
 
     const fullBooking = await plotBookingModel.findByIdFull(id, pool);
 
-    // Notify the agent/user who originally booked the plot.
-    if (booking.booked_by) {
-      pushBookingNotification([booking.booked_by], {
+    // Notify both the booker and the referrer (so referrers also see their
+    // referred booking go ACTIVE in the agent app).
+    const recipientIds = [...new Set([booking.booked_by, booking.referred_by].filter(Boolean))];
+    if (recipientIds.length) {
+      const colonyName = fullBooking?.colony_name || await getColonyName(fullBooking?.colony_map_id || booking.colony_map_id);
+      pushBookingNotification(recipientIds, {
         title: 'Booking approved',
-        body: `Plot ${fullBooking?.plot_number || ''} booked for ${booking.client_name || 'your client'} is now confirmed.`,
+        body: `Plot ${fullBooking?.plot_number || ''}${colonyName ? ` in ${colonyName}` : ''} booked for ${booking.client_name || 'your client'} is now confirmed.`,
         data: {
           type: 'booking',
           action: 'approved',
           booking_id: id,
           plot_number: fullBooking?.plot_number || '',
+          colony_name: colonyName || '',
+          colony_map_id: fullBooking?.colony_map_id || booking.colony_map_id || '',
           route: `/bookings/${id}`,
         },
       });
@@ -491,9 +508,11 @@ export const getPendingApprovals = asyncHandler(async (req, res) => {
   const siteId = await getSiteId(req.user.id, req.user);
   if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
+  const { colony_map_id } = req.query;
   const result = await plotBookingModel.findBySite({
     siteId,
     status: 'PENDING_APPROVAL',
+    colonyMapId: colony_map_id || undefined,
     page: 1,
     limit: 100,
   }, pool);
@@ -507,18 +526,21 @@ export const getBookings = asyncHandler(async (req, res) => {
   const siteId = await getSiteId(req.user.id, req.user);
   if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
-  const { page, limit, status, plot_id, booked_by_id } = req.query;
+  const { page, limit, status, plot_id, booked_by_id, colony_map_id } = req.query;
   const filters = {
     siteId,
     status,
     plotId: plot_id,
+    colonyMapId: colony_map_id || undefined,
     page: parseInt(page) || 1,
     limit: parseInt(limit) || 20,
   };
 
-  // Agents only see their bookings; admins can filter by booked_by_id
-  if (req.user.role === 'AGENT') {
-    filters.bookedBy = req.user.id;
+  // Agents and team heads see only bookings they booked OR were referred to them
+  // (i.e. anything tied to their referral code). Admins/Owners see everything.
+  const role = String(req.user.role || '').toUpperCase();
+  if (role === 'AGENT' || role === 'TEAM_HEAD') {
+    filters.bookedByOrReferred = req.user.id;
   } else if (booked_by_id) {
     filters.bookedBy = booked_by_id;
   }
@@ -533,6 +555,14 @@ export const getBookings = asyncHandler(async (req, res) => {
 export const getBooking = asyncHandler(async (req, res) => {
   const booking = await plotBookingModel.findByIdFull(req.params.id, pool);
   if (!booking) return res.status(404).json({ success: false, message: 'Booking not found' });
+
+  // Agents/team heads can only view bookings tied to their referral code
+  const role = String(req.user.role || '').toUpperCase();
+  if (role === 'AGENT' || role === 'TEAM_HEAD') {
+    const me = String(req.user.id);
+    const isMine = String(booking.booked_by) === me || String(booking.referred_by) === me;
+    if (!isMine) return res.status(403).json({ success: false, message: 'Not your booking' });
+  }
 
   // Get payments
   const payments = await paymentModel.findByBooking(booking.id, pool);
@@ -608,7 +638,7 @@ export const updateBookingStatus = asyncHandler(async (req, res) => {
 // ============================================================
 export const publicBookByLabel = asyncHandler(async (req, res) => {
   const {
-    plot_label, site_id,
+    plot_label, site_id, colony_name,
     client_name, client_phone, client_email, client_address,
     booking_amount, payment_method, transaction_id,
     ref_sponsor_code, remarks,
@@ -643,43 +673,71 @@ export const publicBookByLabel = asyncHandler(async (req, res) => {
     resolvedSiteId = siteRes.rows[0].id;
   }
 
+  // Resolve colony by name when the website tells us which colony the booking
+  // is for. Plot lookup + auto-create are scoped to this colony so labels like
+  // "B-19" don't collide across colonies under the same site.
+  let scopedColonyId = null;
+  if (colony_name) {
+    const cmRes = await pool.query(
+      'SELECT id FROM colony_maps WHERE site_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1',
+      [resolvedSiteId, String(colony_name).trim()]
+    );
+    if (cmRes.rows.length === 0) {
+      return res.status(404).json({ success: false, message: `Colony "${colony_name}" not found for this site` });
+    }
+    scopedColonyId = cmRes.rows[0].id;
+  }
+
   const normalizedLabel = plot_label.replace(/[()]/g, '').trim().toUpperCase();
 
-  // Try to find an existing plot by plot_number in any colony map for this site
+  // Try to find an existing plot by plot_number — scoped to the requested
+  // colony when one was provided, otherwise across the whole site.
   let plot = null;
-  const findRes = await pool.query(
-    `SELECT mp.* FROM map_plots mp
-     JOIN colony_maps cm ON mp.colony_map_id = cm.id
-     WHERE cm.site_id = $1
-       AND UPPER(REPLACE(REPLACE(mp.plot_number, '-', ''), '.', ''))
-         = UPPER(REPLACE(REPLACE($2, '-', ''), '.', ''))
-     LIMIT 1`,
-    [resolvedSiteId, normalizedLabel]
-  );
+  const findParams = scopedColonyId
+    ? [resolvedSiteId, normalizedLabel, scopedColonyId]
+    : [resolvedSiteId, normalizedLabel];
+  const findSql = scopedColonyId
+    ? `SELECT mp.* FROM map_plots mp
+       JOIN colony_maps cm ON mp.colony_map_id = cm.id
+       WHERE cm.site_id = $1
+         AND UPPER(REPLACE(REPLACE(mp.plot_number, '-', ''), '.', ''))
+           = UPPER(REPLACE(REPLACE($2, '-', ''), '.', ''))
+         AND mp.colony_map_id = $3
+       LIMIT 1`
+    : `SELECT mp.* FROM map_plots mp
+       JOIN colony_maps cm ON mp.colony_map_id = cm.id
+       WHERE cm.site_id = $1
+         AND UPPER(REPLACE(REPLACE(mp.plot_number, '-', ''), '.', ''))
+           = UPPER(REPLACE(REPLACE($2, '-', ''), '.', ''))
+       LIMIT 1`;
+  const findRes = await pool.query(findSql, findParams);
   if (findRes.rows.length > 0) {
     plot = findRes.rows[0];
   }
 
-  // If no plot exists, auto-create it under the first colony map for this site
+  // If no plot exists, auto-create it under the requested colony (or fall back
+  // to the first colony / a brand-new colony when none was specified).
   if (!plot) {
-    let colonyMapId;
-    const cmRes = await pool.query(
-      'SELECT id FROM colony_maps WHERE site_id = $1 ORDER BY created_at ASC LIMIT 1',
-      [resolvedSiteId]
-    );
-    if (cmRes.rows.length > 0) {
-      colonyMapId = cmRes.rows[0].id;
-    } else {
-      // Create a default colony map for this site, using the site's name
-      const siteNameRes = await pool.query('SELECT name FROM sites WHERE id = $1', [resolvedSiteId]);
-      const siteName = siteNameRes.rows[0]?.name || 'Colony Map';
-      const newCmId = randomUUID();
-      await pool.query(
-        `INSERT INTO colony_maps (id, site_id, name, image_url, image_width, image_height, created_at, updated_at)
-         VALUES ($1, $2, $3, '', 1460, 1370, NOW(), NOW())`,
-        [newCmId, resolvedSiteId, siteName]
+    let colonyMapId = scopedColonyId;
+    if (!colonyMapId) {
+      const cmRes = await pool.query(
+        'SELECT id FROM colony_maps WHERE site_id = $1 ORDER BY created_at ASC LIMIT 1',
+        [resolvedSiteId]
       );
-      colonyMapId = newCmId;
+      if (cmRes.rows.length > 0) {
+        colonyMapId = cmRes.rows[0].id;
+      } else {
+        // Create a default colony map for this site, using the site's name
+        const siteNameRes = await pool.query('SELECT name FROM sites WHERE id = $1', [resolvedSiteId]);
+        const siteName = siteNameRes.rows[0]?.name || 'Colony Map';
+        const newCmId = randomUUID();
+        await pool.query(
+          `INSERT INTO colony_maps (id, site_id, name, image_url, image_width, image_height, created_at, updated_at)
+           VALUES ($1, $2, $3, '', 1460, 1370, NOW(), NOW())`,
+          [newCmId, resolvedSiteId, siteName]
+        );
+        colonyMapId = newCmId;
+      }
     }
     const newPlotId = randomUUID();
     await pool.query(
@@ -774,9 +832,12 @@ export const publicBookByLabel = asyncHandler(async (req, res) => {
     // Notify admins/owners of this site that a public booking arrived.
     const approverIds = await getSiteApprovers(resolvedSiteId);
     const paid = !!razorpay_payment_id;
+    const colonyNameNotif = colony_name || await getColonyName(plot.colony_map_id);
     pushBookingNotification(approverIds, {
-      title: paid ? 'New paid booking (website)' : 'New website booking',
-      body: `${client_name} booked plot ${plot.plot_number || normalizedLabel}${paid ? ` — ₹${parsedBookingAmount} paid via Razorpay` : ''}`,
+      title: paid
+        ? `New paid booking — ${colonyNameNotif || 'website'}`
+        : `New website booking — ${colonyNameNotif || 'public'}`,
+      body: `${client_name} booked plot ${plot.plot_number || normalizedLabel}${colonyNameNotif ? ` in ${colonyNameNotif}` : ''}${paid ? ` — ₹${parsedBookingAmount} paid via Razorpay` : ''}`,
       data: {
         type: 'booking',
         action: 'pending_approval',
@@ -784,6 +845,8 @@ export const publicBookByLabel = asyncHandler(async (req, res) => {
         plot_number: plot.plot_number || normalizedLabel || '',
         client_name: client_name || '',
         client_phone: client_phone || '',
+        colony_name: colonyNameNotif || '',
+        colony_map_id: plot.colony_map_id || '',
         amount: String(parsedBookingAmount),
         source: 'public_website',
         razorpay_payment_id: razorpay_payment_id || '',
@@ -916,9 +979,12 @@ export const publicBookPlot = asyncHandler(async (req, res) => {
     // Notify admins/owners of this site about the public booking.
     const approverIds = await getSiteApprovers(plot.site_id);
     const paid = !!razorpay_payment_id;
+    const colonyNameNotif = await getColonyName(plot.colony_map_id);
     pushBookingNotification(approverIds, {
-      title: paid ? 'New paid booking (share link)' : 'New share-link booking',
-      body: `${client_name} booked plot ${plot.plot_number || ''}${paid ? ` — ₹${parsedBookingAmount} paid via Razorpay` : ''}`.trim(),
+      title: paid
+        ? `New paid booking — ${colonyNameNotif || 'share link'}`
+        : `New share-link booking — ${colonyNameNotif || 'public'}`,
+      body: `${client_name} booked plot ${plot.plot_number || ''}${colonyNameNotif ? ` in ${colonyNameNotif}` : ''}${paid ? ` — ₹${parsedBookingAmount} paid via Razorpay` : ''}`.trim(),
       data: {
         type: 'booking',
         action: 'pending_approval',
@@ -926,6 +992,8 @@ export const publicBookPlot = asyncHandler(async (req, res) => {
         plot_number: plot.plot_number || '',
         client_name: client_name || '',
         client_phone: client_phone || '',
+        colony_name: colonyNameNotif || '',
+        colony_map_id: plot.colony_map_id || '',
         amount: String(parsedBookingAmount),
         source: 'public_share_link',
         razorpay_payment_id: razorpay_payment_id || '',
@@ -949,10 +1017,13 @@ export const getBookingStats = asyncHandler(async (req, res) => {
   const siteId = await getSiteId(req.user.id, req.user);
   if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
-  // Agents only see stats for their own bookings
-  const bookedBy = req.user.role === 'AGENT' ? req.user.id : null;
+  // Agents and team heads only see stats for bookings tied to their referral code
+  // (either booked by them OR referred by them).
+  const role = String(req.user.role || '').toUpperCase();
+  const bookedByOrReferred = (role === 'AGENT' || role === 'TEAM_HEAD') ? req.user.id : null;
 
-  const stats = await plotBookingModel.getStats(siteId, pool, bookedBy);
+  const { colony_map_id } = req.query;
+  const stats = await plotBookingModel.getStats(siteId, pool, null, colony_map_id || null, bookedByOrReferred);
   res.json({ success: true, stats });
 });
 

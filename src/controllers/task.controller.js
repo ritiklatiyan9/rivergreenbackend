@@ -14,6 +14,8 @@ const bustTaskCache = () => {
     bustCache('cache:*:/api/tasks*');
 };
 
+const isPrivileged = (role) => ['ADMIN', 'OWNER'].includes(String(role || '').toUpperCase());
+
 // ── GET ALL TASKS ────────────────────────────────────────────────────────────
 export const getTasks = asyncHandler(async (req, res) => {
     const siteId = await getSiteId(req.user.id, req.user);
@@ -26,6 +28,8 @@ export const getTasks = asyncHandler(async (req, res) => {
     if (due_date) filters.due_date = due_date;
     if (search) filters.search = search;
     if (overdue === 'true') filters.overdue = true;
+    // Non-admin users only see tasks they created themselves
+    if (!isPrivileged(req.user.role)) filters.created_by = req.user.id;
 
     const tasks = await taskModel.findBySite(siteId, filters, pool);
     res.json({ success: true, tasks });
@@ -36,7 +40,8 @@ export const getTaskStats = asyncHandler(async (req, res) => {
     const siteId = await getSiteId(req.user.id, req.user);
     if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
-    const stats = await taskModel.getStats(siteId, pool);
+    const createdBy = isPrivileged(req.user.role) ? null : req.user.id;
+    const stats = await taskModel.getStats(siteId, pool, createdBy);
     res.json({ success: true, stats });
 });
 
@@ -73,6 +78,9 @@ export const updateTask = asyncHandler(async (req, res) => {
 
     const existing = await taskModel.findById(id, pool);
     if (!existing) return res.status(404).json({ success: false, message: 'Task not found' });
+    if (!isPrivileged(req.user.role) && String(existing.created_by) !== String(req.user.id)) {
+        return res.status(403).json({ success: false, message: 'You can only modify tasks you created' });
+    }
 
     const updates = { updated_at: new Date() };
     if (title !== undefined) updates.title = title.trim();
@@ -92,9 +100,13 @@ export const updateTask = asyncHandler(async (req, res) => {
 // ── DELETE TASK ──────────────────────────────────────────────────────────────
 export const deleteTask = asyncHandler(async (req, res) => {
     const { id } = req.params;
-    const task = await taskModel.delete(id, pool);
-    if (!task) return res.status(404).json({ success: false, message: 'Task not found' });
+    const existing = await taskModel.findById(id, pool);
+    if (!existing) return res.status(404).json({ success: false, message: 'Task not found' });
+    if (!isPrivileged(req.user.role) && String(existing.created_by) !== String(req.user.id)) {
+        return res.status(403).json({ success: false, message: 'You can only delete tasks you created' });
+    }
 
+    await taskModel.delete(id, pool);
     bustTaskCache();
     res.json({ success: true, message: 'Task deleted' });
 });
@@ -108,9 +120,13 @@ export const shiftTaskDueDate = asyncHandler(async (req, res) => {
         return res.status(400).json({ success: false, message: 'New date is required' });
     }
 
-    const task = await taskModel.shiftDueDate(id, new_date, reason, pool);
-    if (!task) return res.status(404).json({ success: false, message: 'Task not found' });
+    const existing = await taskModel.findById(id, pool);
+    if (!existing) return res.status(404).json({ success: false, message: 'Task not found' });
+    if (!isPrivileged(req.user.role) && String(existing.created_by) !== String(req.user.id)) {
+        return res.status(403).json({ success: false, message: 'You can only reschedule tasks you created' });
+    }
 
+    const task = await taskModel.shiftDueDate(id, new_date, reason, pool);
     bustTaskCache();
     res.json({ success: true, task });
 });
@@ -118,6 +134,11 @@ export const shiftTaskDueDate = asyncHandler(async (req, res) => {
 // ── GET SHIFT HISTORY ────────────────────────────────────────────────────────
 export const getTaskShiftHistory = asyncHandler(async (req, res) => {
     const { id } = req.params;
+    const existing = await taskModel.findById(id, pool);
+    if (!existing) return res.status(404).json({ success: false, message: 'Task not found' });
+    if (!isPrivileged(req.user.role) && String(existing.created_by) !== String(req.user.id)) {
+        return res.status(403).json({ success: false, message: 'You can only view history of tasks you created' });
+    }
     const history = await taskModel.getShiftHistory(id, pool);
     res.json({ success: true, history });
 });
@@ -127,7 +148,8 @@ export const autoShiftOverdue = asyncHandler(async (req, res) => {
     const siteId = await getSiteId(req.user.id, req.user);
     if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
-    const shiftedIds = await taskModel.autoShiftOverdue(siteId, pool);
+    const createdBy = isPrivileged(req.user.role) ? null : req.user.id;
+    const shiftedIds = await taskModel.autoShiftOverdue(siteId, pool, createdBy);
     bustTaskCache();
     res.json({ success: true, shifted: shiftedIds.length, ids: shiftedIds });
 });

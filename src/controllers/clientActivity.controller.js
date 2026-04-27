@@ -60,7 +60,7 @@ export const getActivities = asyncHandler(async (req, res) => {
   if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
   const dbUser = await userModel.findById(req.user.id, pool);
-  const { page, limit, activity_type, status, lead_id, plot_id, booking_id, date_from, date_to } = req.query;
+  const { page, limit, activity_type, status, lead_id, plot_id, booking_id, date_from, date_to, colony_map_id } = req.query;
 
   const filters = {
     siteId,
@@ -71,6 +71,7 @@ export const getActivities = asyncHandler(async (req, res) => {
     bookingId: booking_id,
     dateFrom: date_from,
     dateTo: date_to,
+    colonyMapId: colony_map_id || undefined,
     page: parseInt(page) || 1,
     limit: parseInt(limit) || 20,
   };
@@ -146,7 +147,8 @@ export const getTodayActivities = asyncHandler(async (req, res) => {
   if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
   const assignedTo = req.user.role === 'AGENT' ? req.user.id : null;
-  const activities = await clientActivityModel.findToday(siteId, assignedTo, pool);
+  const { colony_map_id } = req.query;
+  const activities = await clientActivityModel.findToday(siteId, assignedTo, pool, colony_map_id || null);
   res.json({ success: true, activities });
 });
 
@@ -158,6 +160,7 @@ export const getActivityStats = asyncHandler(async (req, res) => {
   if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
   const assignedTo = req.user.role === 'AGENT' ? req.user.id : null;
-  const stats = await clientActivityModel.getStats(siteId, assignedTo, pool);
+  const { colony_map_id } = req.query;
+  const stats = await clientActivityModel.getStats(siteId, assignedTo, pool, colony_map_id || null);
   res.json({ success: true, stats });
 });
