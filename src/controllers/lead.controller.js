@@ -63,14 +63,27 @@ export const createLead = asyncHandler(async (req, res) => {
 
     const effectiveAssignedTo = assigned_to || req.user.id;
 
-    // Handle photo upload if provided
+    // Multer is configured with .fields([photo, colony_image]) — req.files is
+    // an object keyed by field name, each holding an array (max 1 here).
+    const photoFile = req.files?.photo?.[0] || null;
+    const colonyFile = req.files?.colony_image?.[0] || null;
+
     let photoUrl = null;
-    if (req.file) {
+    if (photoFile) {
         try {
-            const result = await uploadSingle(req.file, 's3');
+            const result = await uploadSingle(photoFile, 's3');
             photoUrl = result.secure_url;
         } catch (err) {
             console.error('Lead photo upload error:', err);
+        }
+    }
+    let colonyImageUrl = null;
+    if (colonyFile) {
+        try {
+            const result = await uploadSingle(colonyFile, 's3');
+            colonyImageUrl = result.secure_url;
+        } catch (err) {
+            console.error('Lead colony image upload error:', err);
         }
     }
 
@@ -88,6 +101,7 @@ export const createLead = asyncHandler(async (req, res) => {
         notes: notes || null,
         lead_source: lead_source || 'Other',
         photo_url: photoUrl,
+        colony_image_url: colonyImageUrl,
     };
 
     const newLead = await leadModel.create(leadData, pool);
@@ -266,18 +280,33 @@ export const updateLead = asyncHandler(async (req, res) => {
         updateData.lead_category = (lead_category && VALID_CATEGORIES.includes(lead_category)) ? lead_category : null;
     }
 
-    // Handle photo upload
-    if (req.file) {
+    // Handle photo + colony image uploads (multer .fields exposes req.files
+    // keyed by field name).
+    const photoFile = req.files?.photo?.[0] || null;
+    const colonyFile = req.files?.colony_image?.[0] || null;
+
+    if (photoFile) {
         try {
-            const result = await uploadSingle(req.file, 's3');
+            const result = await uploadSingle(photoFile, 's3');
             updateData.photo_url = result.secure_url;
         } catch (err) {
             console.error('Lead photo upload error:', err);
         }
     }
-    // Allow removing photo
+    if (colonyFile) {
+        try {
+            const result = await uploadSingle(colonyFile, 's3');
+            updateData.colony_image_url = result.secure_url;
+        } catch (err) {
+            console.error('Lead colony image upload error:', err);
+        }
+    }
+    // Allow explicit removal of either image
     if (req.body.remove_photo === 'true') {
         updateData.photo_url = null;
+    }
+    if (req.body.remove_colony_image === 'true') {
+        updateData.colony_image_url = null;
     }
 
     // Only ADMIN/OWNER can reassign via update

@@ -11,6 +11,8 @@ async function run() {
     try {
         await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS address TEXT, ADD COLUMN IF NOT EXISTS profession VARCHAR(255);`);
         console.log('Successfully added address and profession to leads');
+        await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS colony_image_url TEXT;`);
+        console.log('Successfully added colony_image_url to leads');
     } catch (e) {
         console.error(e);
     } finally {
