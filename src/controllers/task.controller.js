@@ -10,9 +10,9 @@ const getSiteId = async (userId, reqUser) => {
     return user?.site_id;
 };
 
-const bustTaskCache = () => {
-    bustCache('cache:*:/api/tasks*');
-};
+// Returns the cache-bust promise so callers can `await` it before responding,
+// guaranteeing the next GET /tasks from the same client never sees stale data.
+const bustTaskCache = () => bustCache('cache:*:/api/tasks*');
 
 const isPrivileged = (role) => ['ADMIN', 'OWNER'].includes(String(role || '').toUpperCase());
 
@@ -67,7 +67,7 @@ export const createTask = asyncHandler(async (req, res) => {
         current_due_date: due_date,
     }, pool);
 
-    bustTaskCache();
+    await bustTaskCache();
     res.status(201).json({ success: true, task });
 });
 
@@ -93,7 +93,7 @@ export const updateTask = asyncHandler(async (req, res) => {
     }
 
     const task = await taskModel.update(id, updates, pool);
-    bustTaskCache();
+    await bustTaskCache();
     res.json({ success: true, task });
 });
 
@@ -107,7 +107,7 @@ export const deleteTask = asyncHandler(async (req, res) => {
     }
 
     await taskModel.delete(id, pool);
-    bustTaskCache();
+    await bustTaskCache();
     res.json({ success: true, message: 'Task deleted' });
 });
 
@@ -127,7 +127,7 @@ export const shiftTaskDueDate = asyncHandler(async (req, res) => {
     }
 
     const task = await taskModel.shiftDueDate(id, new_date, reason, pool);
-    bustTaskCache();
+    await bustTaskCache();
     res.json({ success: true, task });
 });
 
@@ -150,6 +150,6 @@ export const autoShiftOverdue = asyncHandler(async (req, res) => {
 
     const createdBy = isPrivileged(req.user.role) ? null : req.user.id;
     const shiftedIds = await taskModel.autoShiftOverdue(siteId, pool, createdBy);
-    bustTaskCache();
+    await bustTaskCache();
     res.json({ success: true, shifted: shiftedIds.length, ids: shiftedIds });
 });
