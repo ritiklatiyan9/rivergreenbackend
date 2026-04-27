@@ -62,16 +62,8 @@ import { cacheMiddleware } from '../middlewares/cache.middleware.js';
 // ── All routes require auth ──────────────────────────────────────────────────
 router.use(authMiddleware);
 
-// Lead create/update accept two image fields:
-//   - `photo`         → lead's profile photo (existing behavior)
-//   - `colony_image`  → image of the lead's colony / property of interest
-const leadImageUpload = upload.fields([
-    { name: 'photo', maxCount: 1 },
-    { name: 'colony_image', maxCount: 1 },
-]);
-
 // CRUD
-router.post('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), leadImageUpload, createLead);
+router.post('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), upload.single('photo'), createLead);
 router.get('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getLeads);
 
 // Static routes BEFORE :id
@@ -98,7 +90,7 @@ router.patch(
 // Single lead routes
 router.get('/:id/full', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getLeadFullDetails);
 router.get('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getLead);
-router.put('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), leadImageUpload, updateLead);
+router.put('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), upload.single('photo'), updateLead);
 router.delete('/:id', checkRole(['TEAM_HEAD', 'ADMIN', 'OWNER']), deleteLead);
 router.post('/:id/assign', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), assignLead);
 router.get('/:id/assignment-history', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getLeadAssignmentHistory);

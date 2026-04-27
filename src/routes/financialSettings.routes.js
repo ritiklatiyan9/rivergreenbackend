@@ -19,6 +19,15 @@ router.get('/public/:siteId', cacheMiddleware(1800), getPublicFinancialSettings)
 router.use(authMiddleware, checkRole(['ADMIN']));
 router.get('/list', cacheMiddleware(120), listFinancialSettings);
 router.get('/', cacheMiddleware(120), getFinancialSettings);
-router.put('/', upload.single('upi_scanner'), updateFinancialSettings);
+// PUT accepts two image fields: the existing UPI scanner, plus a per-colony
+// hero image saved as `site_financial_settings.colony_image_url`.
+router.put(
+  '/',
+  upload.fields([
+    { name: 'upi_scanner', maxCount: 1 },
+    { name: 'colony_image', maxCount: 1 },
+  ]),
+  updateFinancialSettings,
+);
 
 export default router;
