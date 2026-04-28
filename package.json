@@ -5,7 +5,10 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "nodemon src/server.js"
+    "dev": "nodemon src/server.js",
+    "test": "node --test src/__tests__/*.test.js",
+    "test:e2e": "node --test src/__tests__/zkteco-e2e.test.js",
+    "mock:zk": "node scripts/zkteco-mock-server.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.490.0",
@@ -21,6 +24,7 @@
     "jsonwebtoken": "^9.0.2",
     "morgan": "^1.10.0",
     "multer": "^2.0.0",
+    "node-zklib": "^1.1.10",
     "pg": "^8.11.3",
     "razorpay": "^2.9.6",
     "redis": "^5.11.0",

@@ -3,6 +3,26 @@ import { verifyToken } from '../config/jwt.js';
 import pool from './db.js';
 import agentLiveLocationModel from '../models/AgentLiveLocation.model.js';
 
+// Module-level handle so non-request code (workers) can emit without
+// having to thread `app` everywhere.
+let _io = null;
+export const getIO = () => _io;
+
+const ADMIN_ROLES = new Set(['ADMIN', 'OWNER']);
+
+/**
+ * Emit a biometric punch to admins viewing the matching room. Safe to call
+ * before sockets are ready — no-ops if io is uninitialised.
+ */
+export const emitAttendancePunch = (record) => {
+  if (!_io || !record) return;
+  const payload = { ...record, _ts: Date.now() };
+  _io.to(`attendance:all`).emit('attendance:punch', payload);
+  if (record.location_id) {
+    _io.to(`attendance:location:${record.location_id}`).emit('attendance:punch', payload);
+  }
+};
+
 /**
  * Initialize Socket.io for real-time chat
  */
@@ -16,8 +36,10 @@ export const initSocket = (httpServer, app) => {
     transports: ['websocket', 'polling'],
   });
 
-  // Store io instance on app for use in controllers
+  // Store io instance on app for use in controllers, and at module scope
+  // for workers that don't have access to the request lifecycle.
   app.set('io', io);
+  _io = io;
 
   // Authentication middleware for socket connections
   io.use((socket, next) => {
@@ -38,6 +60,17 @@ export const initSocket = (httpServer, app) => {
     // Join a personal room for targeted messages
     socket.join(`user_${userId}`);
     console.log(`Socket connected: user_${userId}`);
+
+    // ── Attendance live feed rooms (admin-only) ────────────────────────
+    socket.on('attendance:join', ({ locationId } = {}) => {
+      if (!ADMIN_ROLES.has(socket.user.role)) return;
+      if (locationId) socket.join(`attendance:location:${locationId}`);
+      else socket.join('attendance:all');
+    });
+    socket.on('attendance:leave', ({ locationId } = {}) => {
+      if (locationId) socket.leave(`attendance:location:${locationId}`);
+      else socket.leave('attendance:all');
+    });
 
     // Handle typing indicators
     socket.on('chat:typing', ({ conversationId, isTyping }) => {

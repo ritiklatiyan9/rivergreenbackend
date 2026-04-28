@@ -159,6 +159,79 @@ class UserModel extends MasterModel {
     return result.rows[0];
   }
 
+  // ── ZKTeco biometric mapping ──────────────────────────────────────────
+
+  /**
+   * Build a Map<zkteco_user_id, {id, primary_site_id}> across all active
+   * users with a biometric mapping. Used by the poller's reducer to decide
+   * whether a punch is at the user's primary site or a secondary one.
+   *
+   * The location argument is unused today — we return all mapped users
+   * because a user's biometric ID may legitimately punch at any office
+   * the company allows them into. Kept for forward compatibility if we
+   * later restrict mappings per-site.
+   */
+  async buildZktecoUserMapForLocation(_locationId, pool) {
+    const result = await pool.query(
+      `SELECT id, zkteco_user_id, primary_site_id
+       FROM ${this.tableName}
+       WHERE zkteco_user_id IS NOT NULL AND is_active = true`,
+      [],
+    );
+    const map = new Map();
+    for (const r of result.rows) {
+      map.set(Number(r.zkteco_user_id), {
+        id: r.id,
+        primary_site_id: r.primary_site_id ?? null,
+      });
+    }
+    return map;
+  }
+
+  /** Look up one user by their device user-id. */
+  async findByZktecoId(zktecoUserId, pool) {
+    const result = await pool.query(
+      `SELECT id, name, email, role, zkteco_user_id, primary_site_id
+       FROM ${this.tableName}
+       WHERE zkteco_user_id = $1 AND is_active = true LIMIT 1`,
+      [zktecoUserId],
+    );
+    return result.rows[0];
+  }
+
+  /** Set or clear a user's biometric mapping + primary site in one call. */
+  async setZktecoMapping(userId, { zktecoUserId, primarySiteId }, pool) {
+    const result = await pool.query(
+      `UPDATE ${this.tableName}
+       SET zkteco_user_id = $2,
+           primary_site_id = $3,
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING id, name, zkteco_user_id, primary_site_id`,
+      [userId, zktecoUserId ?? null, primarySiteId ?? null],
+    );
+    return result.rows[0];
+  }
+
+  /** All users (with role) for the biometric mapping admin page. */
+  async listForBiometricMapping(siteId, pool) {
+    const params = [];
+    let where = `role IN ('ADMIN','SUPERVISOR','TEAM_HEAD','AGENT') AND is_active = true`;
+    if (siteId) {
+      where += ` AND site_id = $1`;
+      params.push(siteId);
+    }
+    const result = await pool.query(
+      `SELECT id, name, email, phone, role, profile_photo,
+              zkteco_user_id, primary_site_id
+       FROM ${this.tableName}
+       WHERE ${where}
+       ORDER BY name ASC`,
+      params,
+    );
+    return result.rows;
+  }
+
   // Find admin for a specific site
   async findAdminBySite(siteId, pool) {
     const query = `

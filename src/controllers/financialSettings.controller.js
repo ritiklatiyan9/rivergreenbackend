@@ -78,13 +78,10 @@ export const updateFinancialSettings = asyncHandler(async (req, res) => {
     if (!ok) return res.status(404).json({ success: false, message: 'Colony not found' });
   }
 
-  // Multer .fields() exposes req.files keyed by field name, each an array.
-  const upiFile = req.files?.upi_scanner?.[0] || null;
-  const colonyFile = req.files?.colony_image?.[0] || null;
-
+  // UPI scanner image upload
   let upi_scanner_url = req.body.upi_scanner_url;
-  if (upiFile) {
-    const result = await uploadSingle(upiFile, 's3');
+  if (req.file) {
+    const result = await uploadSingle(req.file, 's3');
     upi_scanner_url = result.secure_url;
   }
 
@@ -103,16 +100,6 @@ export const updateFinancialSettings = asyncHandler(async (req, res) => {
     updated_by: req.user.id,
     created_by: req.user.id,
   };
-
-  // Only touch colony_image_url when we have an explicit directive (new
-  // upload or removal). Omitting it leaves the existing value intact, so a
-  // save that doesn't change the image won't accidentally clear it.
-  if (colonyFile) {
-    const result = await uploadSingle(colonyFile, 's3');
-    data.colony_image_url = result.secure_url;
-  } else if (req.body.remove_colony_image === 'true') {
-    data.colony_image_url = null;
-  }
 
   const settings = await financialSettingsModel.upsert(siteId, colonyId, data, pool);
   res.json({ success: true, settings, message: 'Financial settings updated' });

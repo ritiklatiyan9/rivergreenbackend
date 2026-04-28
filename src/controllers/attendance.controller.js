@@ -3,19 +3,6 @@ import { attendanceLocationModel, attendanceRecordModel } from '../models/Attend
 import pool from '../config/db.js';
 import { bustCache } from '../middlewares/cache.middleware.js';
 
-// ─── Haversine formula — returns distance in meters ───
-function haversineDistance(lat1, lon1, lat2, lon2) {
-  const R = 6371000; // Earth's radius in meters
-  const toRad = (deg) => (deg * Math.PI) / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
-
 // ═══════════════════════════════════════════════════════
 // LOCATION (Admin CRUD)
 // ═══════════════════════════════════════════════════════
@@ -34,7 +21,10 @@ export const getActiveLocations = asyncHandler(async (req, res) => {
 
 /** POST /api/attendance/locations — create location */
 export const createLocation = asyncHandler(async (req, res) => {
-  const { name, latitude, longitude, radius_meters, office_start_time, office_end_time } = req.body;
+  const {
+    name, latitude, longitude, radius_meters, office_start_time, office_end_time,
+    zkteco_enabled, zkteco_ip, zkteco_port, zkteco_device_id, zkteco_serial,
+  } = req.body;
   if (!name || latitude == null || longitude == null) {
     return res.status(400).json({ success: false, message: 'Name, latitude, and longitude are required' });
   }
@@ -47,9 +37,15 @@ export const createLocation = asyncHandler(async (req, res) => {
     longitude: parseFloat(longitude),
     radius_meters: parseInt(radius_meters) || 100,
     created_by: req.user.id,
+    site_id: req.user.site_id || null,
   };
   if (office_start_time) payload.office_start_time = office_start_time;
   if (office_end_time) payload.office_end_time = office_end_time;
+  if (zkteco_enabled !== undefined) payload.zkteco_enabled = !!zkteco_enabled;
+  if (zkteco_ip) payload.zkteco_ip = zkteco_ip;
+  if (zkteco_port) payload.zkteco_port = parseInt(zkteco_port, 10) || 4370;
+  if (zkteco_device_id) payload.zkteco_device_id = parseInt(zkteco_device_id, 10);
+  if (zkteco_serial) payload.zkteco_serial = zkteco_serial;
   const location = await attendanceLocationModel.create(payload, pool);
   bustCache('cache:*:/api/attendance*');
   res.status(201).json({ success: true, location });
@@ -58,7 +54,10 @@ export const createLocation = asyncHandler(async (req, res) => {
 /** PUT /api/attendance/locations/:id — update location */
 export const updateLocation = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { name, latitude, longitude, radius_meters, is_active, office_start_time, office_end_time } = req.body;
+  const {
+    name, latitude, longitude, radius_meters, is_active, office_start_time, office_end_time,
+    zkteco_enabled, zkteco_ip, zkteco_port, zkteco_device_id, zkteco_serial,
+  } = req.body;
 
   const existing = await attendanceLocationModel.findById(id, pool);
   if (!existing) return res.status(404).json({ success: false, message: 'Location not found' });
@@ -77,6 +76,11 @@ export const updateLocation = asyncHandler(async (req, res) => {
   if (is_active !== undefined) updates.is_active = is_active;
   if (office_start_time !== undefined) updates.office_start_time = office_start_time;
   if (office_end_time !== undefined) updates.office_end_time = office_end_time;
+  if (zkteco_enabled !== undefined) updates.zkteco_enabled = !!zkteco_enabled;
+  if (zkteco_ip !== undefined) updates.zkteco_ip = zkteco_ip || null;
+  if (zkteco_port !== undefined) updates.zkteco_port = parseInt(zkteco_port, 10) || 4370;
+  if (zkteco_device_id !== undefined) updates.zkteco_device_id = zkteco_device_id ? parseInt(zkteco_device_id, 10) : null;
+  if (zkteco_serial !== undefined) updates.zkteco_serial = zkteco_serial || null;
   updates.updated_at = new Date();
 
   const location = await attendanceLocationModel.update(id, updates, pool);
@@ -98,126 +102,26 @@ export const deleteLocation = asyncHandler(async (req, res) => {
 // CHECK-IN / CHECK-OUT (Agent)
 // ═══════════════════════════════════════════════════════
 
-/** POST /api/attendance/check-in — mark attendance check-in */
+/**
+ * POST /api/attendance/check-in — DEPRECATED (GPS self check-in)
+ * Replaced by ZKTeco biometric devices. Old mobile clients still calling
+ * this endpoint receive 410 Gone with a clear message.
+ */
 export const checkIn = asyncHandler(async (req, res) => {
-  const { location_id, latitude, longitude } = req.body;
-  const userId = req.user.id;
-
-  if (!location_id || latitude == null || longitude == null) {
-    return res.status(400).json({ success: false, message: 'location_id, latitude, and longitude are required' });
-  }
-
-  // Get the office location
-  const location = await attendanceLocationModel.findById(location_id, pool);
-  if (!location || !location.is_active) {
-    return res.status(404).json({ success: false, message: 'Location not found or inactive' });
-  }
-
-  // Check if already checked in today
-  const existing = await attendanceRecordModel.findTodayRecord(userId, location_id, pool);
-  if (existing) {
-    return res.status(400).json({ success: false, message: 'Already checked in today at this location', record: existing });
-  }
-
-  // Calculate distance using Haversine
-  const distance = haversineDistance(
-    parseFloat(latitude), parseFloat(longitude),
-    parseFloat(location.latitude), parseFloat(location.longitude)
-  );
-
-  // Check if within allowed radius
-  if (distance > location.radius_meters) {
-    return res.status(403).json({
-      success: false,
-      message: `You are ${Math.round(distance)}m away. Must be within ${location.radius_meters}m of ${location.name}.`,
-      distance: Math.round(distance),
-      allowed_radius: location.radius_meters,
-    });
-  }
-
-  // Determine status — check if late (after office_start_time)
-  const now = new Date();
-  const officeStart = location.office_start_time || '10:00:00';
-  const [startH, startM] = officeStart.split(':').map(Number);
-  const nowH = now.getHours();
-  const nowM = now.getMinutes();
-  const status = (nowH > startH || (nowH === startH && nowM > startM)) ? 'LATE' : 'PRESENT';
-
-  const record = await attendanceRecordModel.create({
-    user_id: userId,
-    location_id: parseInt(location_id),
-    check_in_time: now,
-    check_in_lat: parseFloat(latitude),
-    check_in_lng: parseFloat(longitude),
-    check_in_distance_m: Math.round(distance * 100) / 100,
-    status,
-    date: now.toISOString().split('T')[0],
-  }, pool);
-
-  res.status(201).json({
-    success: true,
-    message: `Checked in successfully at ${location.name}${status === 'LATE' ? ' (Late)' : ''}`,
-    record,
-    distance: Math.round(distance),
+  return res.status(410).json({
+    success: false,
+    message: 'GPS check-in has been retired. Please use the biometric device at your location.',
+    deprecated: true,
   });
-  bustCache('cache:*:/api/attendance*');
 });
 
-/** POST /api/attendance/check-out — mark attendance check-out */
+/** POST /api/attendance/check-out — DEPRECATED (GPS self check-out) */
 export const checkOut = asyncHandler(async (req, res) => {
-  const { location_id, latitude, longitude } = req.body;
-  const userId = req.user.id;
-
-  if (!location_id || latitude == null || longitude == null) {
-    return res.status(400).json({ success: false, message: 'location_id, latitude, and longitude are required' });
-  }
-
-  const location = await attendanceLocationModel.findById(location_id, pool);
-  if (!location) {
-    return res.status(404).json({ success: false, message: 'Location not found' });
-  }
-
-  // Find today's check-in record
-  const record = await attendanceRecordModel.findTodayRecord(userId, location_id, pool);
-  if (!record) {
-    return res.status(400).json({ success: false, message: 'No check-in found for today at this location' });
-  }
-  if (record.check_out_time) {
-    return res.status(400).json({ success: false, message: 'Already checked out today', record });
-  }
-
-  // Calculate distance
-  const distance = haversineDistance(
-    parseFloat(latitude), parseFloat(longitude),
-    parseFloat(location.latitude), parseFloat(location.longitude)
-  );
-
-  // Check if within allowed radius for checkout
-  if (distance > location.radius_meters) {
-    return res.status(403).json({
-      success: false,
-      message: `You are ${Math.round(distance)}m away. Must be within ${location.radius_meters}m of ${location.name} to check out.`,
-      distance: Math.round(distance),
-      allowed_radius: location.radius_meters,
-    });
-  }
-
-  const now = new Date();
-  const updated = await attendanceRecordModel.update(record.id, {
-    check_out_time: now,
-    check_out_lat: parseFloat(latitude),
-    check_out_lng: parseFloat(longitude),
-    check_out_distance_m: Math.round(distance * 100) / 100,
-    updated_at: now,
-  }, pool);
-
-  res.json({
-    success: true,
-    message: `Checked out successfully from ${location.name}`,
-    record: updated,
-    distance: Math.round(distance),
+  return res.status(410).json({
+    success: false,
+    message: 'GPS check-out has been retired. Please use the biometric device at your location.',
+    deprecated: true,
   });
-  bustCache('cache:*:/api/attendance*');
 });
 
 /** GET /api/attendance/my-today — agent's today status */
@@ -307,4 +211,95 @@ export const getUserAttendance = asyncHandler(async (req, res) => {
   const m = parseInt(month) || (now.getMonth() + 1);
   const summary = await attendanceRecordModel.getMonthlySummary(userId, y, m, pool);
   res.json({ success: true, summary, year: y, month: m });
+});
+
+/** GET /api/attendance/user-movement/:userId — cross-location timeline for one date */
+export const getUserMovement = asyncHandler(async (req, res) => {
+  const { userId } = req.params;
+  const date = req.query.date || new Date().toISOString().split('T')[0];
+  const movements = await attendanceRecordModel.findUserMovementByDate(userId, date, pool);
+  res.json({ success: true, date, movements });
+});
+
+// ═══════════════════════════════════════════════════════
+// ANALYTICS — per-user and per-team rollups for the
+// Analytics admin page. Date inputs are inclusive ISO
+// dates (YYYY-MM-DD); the controller refuses ranges
+// longer than 366 days to keep query cost bounded.
+// ═══════════════════════════════════════════════════════
+
+const validateRange = (startDate, endDate) => {
+  if (!startDate || !endDate) return 'startDate and endDate are required (YYYY-MM-DD)';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+    return 'startDate / endDate must be ISO dates (YYYY-MM-DD)';
+  }
+  const a = new Date(startDate), b = new Date(endDate);
+  if (b < a) return 'endDate must be on or after startDate';
+  if ((b - a) / 86_400_000 > 366) return 'date range cannot exceed 366 days';
+  return null;
+};
+
+/** GET /api/attendance/analytics/user?user_id=&start_date=&end_date= */
+export const getUserAnalytics = asyncHandler(async (req, res) => {
+  const userId = req.query.user_id;
+  const { start_date: startDate, end_date: endDate } = req.query;
+  if (!userId) return res.status(400).json({ success: false, message: 'user_id is required' });
+  const err = validateRange(startDate, endDate);
+  if (err) return res.status(400).json({ success: false, message: err });
+
+  const userRow = await pool.query(
+    `SELECT id, name, email, phone, role, profile_photo, team_id, primary_site_id
+     FROM users WHERE id = $1`,
+    [userId],
+  );
+  if (!userRow.rows[0]) return res.status(404).json({ success: false, message: 'User not found' });
+
+  const data = await attendanceRecordModel.getUserAnalytics(userId, startDate, endDate, pool);
+  res.json({ success: true, user: userRow.rows[0], startDate, endDate, ...data });
+});
+
+/**
+ * GET /api/attendance/analytics/team
+ *   ?team_id=&site_id=&role=&start_date=&end_date=
+ *
+ * If neither team_id nor site_id is supplied, falls back to the caller's
+ * site (from the auth middleware's effective site_id).
+ */
+export const getTeamAnalytics = asyncHandler(async (req, res) => {
+  const { start_date: startDate, end_date: endDate, team_id: teamId, role } = req.query;
+  let siteId = req.query.site_id;
+  const err = validateRange(startDate, endDate);
+  if (err) return res.status(400).json({ success: false, message: err });
+  if (!teamId && !siteId) siteId = req.user?.site_id || null;
+
+  const members = await attendanceRecordModel.getTeamAnalytics(
+    { teamId: teamId || null, siteId: siteId || null, role: role || null, startDate, endDate },
+    pool,
+  );
+
+  // Fold the per-member rows into a small headline summary so the page
+  // can render its KPI cards without re-summing on the client.
+  const totals = members.reduce((acc, m) => {
+    acc.members += 1;
+    acc.totalPresentDays += parseInt(m.present_days, 10) || 0;
+    acc.totalLateDays += parseInt(m.late_days, 10) || 0;
+    acc.totalHours += parseFloat(m.total_hours) || 0;
+    if (parseInt(m.present_days, 10) > 0) acc.activeMembers += 1;
+    return acc;
+  }, { members: 0, activeMembers: 0, totalPresentDays: 0, totalLateDays: 0, totalHours: 0 });
+
+  res.json({ success: true, startDate, endDate, totals, members });
+});
+
+/** GET /api/attendance/analytics/teams — picker source for the team filter */
+export const listTeamsForAnalytics = asyncHandler(async (req, res) => {
+  const siteId = req.user?.site_id || null;
+  const params = [];
+  let where = `is_active = true`;
+  if (siteId) { where += ` AND site_id = $1`; params.push(siteId); }
+  const result = await pool.query(
+    `SELECT id, name, site_id FROM teams WHERE ${where} ORDER BY name ASC`,
+    params,
+  );
+  res.json({ success: true, teams: result.rows });
 });

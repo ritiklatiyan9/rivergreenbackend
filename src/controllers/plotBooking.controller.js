@@ -12,16 +12,50 @@ import fcmService from '../services/fcm.service.js';
 // Fire-and-forget FCM helper. Runs after HTTP response so booking flow is
 // never blocked by notification delivery.
 const pushBookingNotification = (recipientIds, payload) => {
-  const ids = (recipientIds || []).filter(Boolean);
-  if (ids.length === 0) return;
+  const ids = [...new Set((recipientIds || []).filter(Boolean))];
+  const label = payload?.data?.action || payload?.title || 'booking';
+  if (ids.length === 0) {
+    // Log even when nobody is targeted so missing notifications are debuggable.
+    console.warn(`[booking] FCM push (${label}) skipped — no recipients`);
+    return;
+  }
+  // Truncated id list for grep-friendly logs without leaking full UUIDs.
+  const idsPreview = ids.map((u) => String(u).slice(0, 8)).join(',');
   setImmediate(async () => {
     try {
       const res = await fcmService.sendToUsers(ids, payload);
-      console.log(`[booking] FCM push -> recipients=${ids.length} sent=${res?.sent ?? 0} failed=${res?.failed ?? 0} reason=${res?.reason ?? '-'}`);
+      console.log(`[booking] FCM push (${label}) -> recipients=${ids.length} [${idsPreview}] sent=${res?.sent ?? 0} failed=${res?.failed ?? 0} reason=${res?.reason ?? '-'}`);
     } catch (e) {
-      console.error('[booking] FCM notify failed:', e?.message || e);
+      console.error(`[booking] FCM notify failed (${label}):`, e?.message || e);
     }
   });
+};
+
+// Resolve every agent who has a stake in a booking. We notify all of them
+// so an admin-created booking still pings the agent who owns the lead /
+// holds the plot — not just whoever pressed "Save" on the booking form.
+const resolveBookingStakeholders = async (booking) => {
+  const ids = new Set();
+  if (booking?.booked_by) ids.add(booking.booked_by);
+  if (booking?.referred_by) ids.add(booking.referred_by);
+
+  // Lead's assigned agent
+  if (booking?.lead_id) {
+    try {
+      const r = await pool.query('SELECT assigned_to FROM leads WHERE id = $1', [booking.lead_id]);
+      if (r.rows[0]?.assigned_to) ids.add(r.rows[0].assigned_to);
+    } catch { /* ignore */ }
+  }
+
+  // Plot's assigned agent
+  if (booking?.plot_id) {
+    try {
+      const r = await pool.query('SELECT assigned_agent FROM map_plots WHERE id = $1', [booking.plot_id]);
+      if (r.rows[0]?.assigned_agent) ids.add(r.rows[0].assigned_agent);
+    } catch { /* ignore */ }
+  }
+
+  return [...ids];
 };
 
 // Push fired specifically to the referring agent the moment their referral
@@ -455,25 +489,26 @@ export const approveBooking = asyncHandler(async (req, res) => {
 
     const fullBooking = await plotBookingModel.findByIdFull(id, pool);
 
-    // Notify both the booker and the referrer (so referrers also see their
-    // referred booking go ACTIVE in the agent app).
-    const recipientIds = [...new Set([booking.booked_by, booking.referred_by].filter(Boolean))];
-    if (recipientIds.length) {
-      const colonyName = fullBooking?.colony_name || await getColonyName(fullBooking?.colony_map_id || booking.colony_map_id);
-      pushBookingNotification(recipientIds, {
-        title: 'Booking approved',
-        body: `Plot ${fullBooking?.plot_number || ''}${colonyName ? ` in ${colonyName}` : ''} booked for ${booking.client_name || 'your client'} is now confirmed.`,
-        data: {
-          type: 'booking',
-          action: 'approved',
-          booking_id: id,
-          plot_number: fullBooking?.plot_number || '',
-          colony_name: colonyName || '',
-          colony_map_id: fullBooking?.colony_map_id || booking.colony_map_id || '',
-          route: `/bookings/${id}`,
-        },
-      });
-    }
+    // Notify every agent connected to this booking — booker, referrer, the
+    // lead's assigned agent, and the plot's assigned agent. The approving
+    // admin themselves is filtered out so admins don't notify themselves.
+    const stakeholders = (await resolveBookingStakeholders(booking))
+      .filter((uid) => uid !== req.user.id);
+    const colonyName = fullBooking?.colony_name || await getColonyName(fullBooking?.colony_map_id || booking.colony_map_id);
+    pushBookingNotification(stakeholders, {
+      title: 'Booking approved',
+      body: `Plot ${fullBooking?.plot_number || ''}${colonyName ? ` in ${colonyName}` : ''} booked for ${booking.client_name || 'your client'} is now confirmed.`,
+      data: {
+        type: 'booking',
+        action: 'approved',
+        booking_id: id,
+        plot_number: fullBooking?.plot_number || '',
+        client_name: booking.client_name || '',
+        colony_name: colonyName || '',
+        colony_map_id: fullBooking?.colony_map_id || booking.colony_map_id || '',
+        route: `/bookings/${id}`,
+      },
+    });
 
     res.json({ success: true, booking: fullBooking, message: 'Booking approved!' });
   } catch (err) {
@@ -523,6 +558,28 @@ export const rejectBooking = asyncHandler(async (req, res) => {
 
     bustCache('cache:*:/api/colony-maps*');
     bustCache('cache:*:/api/bookings*');
+
+    // Mirror the approve flow: ping every agent tied to this booking so the
+    // person who submitted it sees the rejection in their app.
+    const stakeholders = (await resolveBookingStakeholders(booking))
+      .filter((uid) => uid !== req.user.id);
+    const fullBooking = await plotBookingModel.findByIdFull(id, pool);
+    const colonyName = fullBooking?.colony_name || await getColonyName(fullBooking?.colony_map_id || booking.colony_map_id);
+    pushBookingNotification(stakeholders, {
+      title: 'Booking rejected',
+      body: `Plot ${fullBooking?.plot_number || ''}${colonyName ? ` in ${colonyName}` : ''} for ${booking.client_name || 'your client'} was not approved${reason ? ` — ${reason}` : ''}.`,
+      data: {
+        type: 'booking',
+        action: 'rejected',
+        booking_id: id,
+        plot_number: fullBooking?.plot_number || '',
+        client_name: booking.client_name || '',
+        colony_name: colonyName || '',
+        colony_map_id: fullBooking?.colony_map_id || booking.colony_map_id || '',
+        reason: reason || '',
+        route: `/bookings/${id}`,
+      },
+    });
 
     res.json({ success: true, message: 'Booking rejected' });
   } catch (err) {
