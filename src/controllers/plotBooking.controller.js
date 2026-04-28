@@ -4,10 +4,23 @@ import paymentModel from '../models/Payment.model.js';
 import mapPlotModel from '../models/MapPlot.model.js';
 import userModel from '../models/User.model.js';
 import pool from '../config/db.js';
-import { bustCache } from '../middlewares/cache.middleware.js';
+import { bustCache, bustMany } from '../middlewares/cache.middleware.js';
 import { randomUUID } from 'crypto';
 import { uploadMany } from '../utils/upload.js';
 import fcmService from '../services/fcm.service.js';
+
+// Standard set of cache patterns to bust on any booking state change.
+// We await these together so the response only goes out *after* L2 (Redis)
+// is cleared — otherwise the frontend's immediate refetch lands on stale
+// Redis data and ends up re-caching the old list / stats.
+const BOOKING_CACHE_PATTERNS = [
+  'cache:*:/api/colony-maps*',
+  'cache:*:/api/bookings*',
+  'cache:*:/api/leads*',
+  'cache:*:/api/site/stats*',
+  'cache:*:/api/dashboard*',
+];
+const bustBookingCaches = () => bustMany(...BOOKING_CACHE_PATTERNS);
 
 // Fire-and-forget FCM helper. Runs after HTTP response so booking flow is
 // never blocked by notification delivery.
@@ -241,11 +254,7 @@ export const createBooking = asyncHandler(async (req, res) => {
 
     await client.query('COMMIT');
 
-    bustCache('cache:*:/api/colony-maps*');
-    bustCache('cache:*:/api/bookings*');
-    bustCache('cache:*:/api/leads*');
-    bustCache('cache:*:/api/site/stats*');
-    bustCache('cache:*:/api/dashboard*');
+    await bustBookingCaches();
 
     const fullBooking = await plotBookingModel.findByIdFull(booking.id, pool);
     res.status(201).json({ success: true, booking: fullBooking });
@@ -398,8 +407,7 @@ export const agentBookPlot = asyncHandler(async (req, res) => {
 
     await dbClient.query('COMMIT');
 
-    bustCache('cache:*:/api/colony-maps*');
-    bustCache('cache:*:/api/bookings*');
+    await bustBookingCaches();
 
     // Notify approvers (admins + owners) that a booking needs review.
     const approverIds = await getSiteApprovers(siteId);
@@ -481,11 +489,7 @@ export const approveBooking = asyncHandler(async (req, res) => {
 
     await dbClient.query('COMMIT');
 
-    bustCache('cache:*:/api/colony-maps*');
-    bustCache('cache:*:/api/bookings*');
-    bustCache('cache:*:/api/leads*');
-    bustCache('cache:*:/api/site/stats*');
-    bustCache('cache:*:/api/dashboard*');
+    await bustBookingCaches();
 
     const fullBooking = await plotBookingModel.findByIdFull(id, pool);
 
@@ -556,8 +560,7 @@ export const rejectBooking = asyncHandler(async (req, res) => {
 
     await dbClient.query('COMMIT');
 
-    bustCache('cache:*:/api/colony-maps*');
-    bustCache('cache:*:/api/bookings*');
+    await bustBookingCaches();
 
     // Mirror the approve flow: ping every agent tied to this booking so the
     // person who submitted it sees the rejection in their app.
@@ -706,11 +709,7 @@ export const updateBookingStatus = asyncHandler(async (req, res) => {
 
     await dbClient.query('COMMIT');
 
-    bustCache('cache:*:/api/colony-maps*');
-    bustCache('cache:*:/api/bookings*');
-    bustCache('cache:*:/api/leads*');
-    bustCache('cache:*:/api/site/stats*');
-    bustCache('cache:*:/api/dashboard*');
+    await bustBookingCaches();
 
     const updated = await plotBookingModel.findByIdFull(id, pool);
     res.json({ success: true, booking: updated });
@@ -915,8 +914,7 @@ export const publicBookByLabel = asyncHandler(async (req, res) => {
 
     await dbClient.query('COMMIT');
 
-    bustCache('cache:*:/api/colony-maps*');
-    bustCache('cache:*:/api/bookings*');
+    await bustBookingCaches();
 
     // Notify admins/owners of this site that a public booking arrived.
     const approverIds = await getSiteApprovers(resolvedSiteId);
@@ -1072,8 +1070,7 @@ export const publicBookPlot = asyncHandler(async (req, res) => {
 
     await dbClient.query('COMMIT');
 
-    bustCache('cache:*:/api/colony-maps*');
-    bustCache('cache:*:/api/bookings*');
+    await bustBookingCaches();
 
     // Notify admins/owners of this site about the public booking.
     const approverIds = await getSiteApprovers(plot.site_id);
@@ -1224,7 +1221,7 @@ export const publicUploadScreenshots = asyncHandler(async (req, res) => {
     screenshot_urls: JSON.stringify(merged),
   }, pool);
 
-  bustCache('cache:*:/api/bookings*');
+  await bustCache('cache:*:/api/bookings*');
 
   res.json({ success: true, screenshot_urls: merged, message: 'Screenshots uploaded successfully' });
 });
