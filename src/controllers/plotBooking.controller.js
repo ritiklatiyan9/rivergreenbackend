@@ -6,6 +6,7 @@ import userModel from '../models/User.model.js';
 import pool from '../config/db.js';
 import { bustCache, bustMany } from '../middlewares/cache.middleware.js';
 import { randomUUID } from 'crypto';
+import crypto from 'crypto';
 import { uploadMany } from '../utils/upload.js';
 import fcmService from '../services/fcm.service.js';
 
@@ -1224,4 +1225,111 @@ export const publicUploadScreenshots = asyncHandler(async (req, res) => {
   await bustCache('cache:*:/api/bookings*');
 
   res.json({ success: true, screenshot_urls: merged, message: 'Screenshots uploaded successfully' });
+});
+
+// ============================================================
+// SIGNED RECEIPT TOKEN  (mirrors the Account Software farmer-payment flow)
+//
+// Issues an HMAC-SHA256 signed token using the PLT receipt type. The token
+// is verifiable on https://defencegarden.com/verify-receipt?token=… via the
+// existing /api/payments/verify-receipt endpoint, since both endpoints share
+// RECEIPT_VERIFY_SECRET. Short keys (t, i, pn, a, …) match the contract the
+// VerifyReceipt page already understands — no frontend changes are needed
+// on defencegarden.com to support this new receipt type.
+// ============================================================
+// Pure helper — builds the signed token + verify URL for a given booking id.
+// Returns the token bundle plus the booking + payments + summary so callers
+// (auth'd agent endpoint and public website endpoint) can both ship the data
+// the receipt PDF needs without duplicating the lookups.
+const buildSignedReceiptForBooking = async (bookingId) => {
+  const booking = await plotBookingModel.findByIdFull(bookingId, pool);
+  if (!booking) return { booking: null };
+
+  const payments = await paymentModel.findByBooking(booking.id, pool);
+  const summary  = await paymentModel.getBookingSummary(booking.id, pool);
+
+  // Most recent COMPLETED payment is the "transaction" the QR certifies.
+  const completed = (payments || [])
+    .filter((p) => String(p.status).toUpperCase() === 'COMPLETED')
+    .sort((a, b) => new Date(b.payment_date || b.created_at) - new Date(a.payment_date || a.created_at));
+  const latest = completed[0] || null;
+
+  const totalPaid = Number(summary?.total_paid || booking.total_paid || 0);
+  const idShort = String(booking.id || '').replace(/-/g, '').slice(0, 8).toUpperCase();
+  // Underscores matter: VerifyReceipt.jsx on defencegarden.com renders the id
+  // verbatim when it contains '_' and otherwise prepends the type prefix.
+  const receiptNo = `PLT_RG_${idShort}`;
+
+  const txnDate = latest?.payment_date
+    ? new Date(latest.payment_date).toISOString().slice(0, 10)
+    : (booking.booking_date
+        ? new Date(booking.booking_date).toISOString().slice(0, 10)
+        : new Date(booking.created_at).toISOString().slice(0, 10));
+
+  // Short-key payload mirrors the PLT contract on the verify page.
+  const payload = {
+    t:  'PLT',
+    i:  receiptNo,
+    pn: booking.client_name || '',
+    a:  totalPaid,
+    dr: 'IN',
+    d:  txnDate,
+    pm: (latest?.payment_method || booking.payment_type || 'CASH').toUpperCase(),
+    sn: booking.colony_name || 'RiverGreen',
+    sy: '',
+    ss: '',
+    rf: booking.plot_number || '',
+  };
+
+  const sig = crypto
+    .createHmac('sha256', process.env.RECEIPT_VERIFY_SECRET || '')
+    .update(JSON.stringify(payload))
+    .digest('hex');
+
+  const token = Buffer.from(JSON.stringify({ p: payload, s: sig })).toString('base64url');
+  const verifyBase = (process.env.RECEIPT_VERIFY_URL || 'https://www.defencegarden.com/verify-receipt').replace(/\/+$/, '');
+  const verifyUrl = `${verifyBase}?token=${token}`;
+
+  return { booking, payments, summary, token, verifyUrl, receiptNo, payload };
+};
+
+export const getBookingReceiptToken = asyncHandler(async (req, res) => {
+  const result = await buildSignedReceiptForBooking(req.params.id);
+  if (!result.booking) return res.status(404).json({ success: false, message: 'Booking not found' });
+
+  // Auth'd flow — agents/team heads can only pull their own bookings.
+  const role = String(req.user.role || '').toUpperCase();
+  if (role === 'AGENT' || role === 'TEAM_HEAD') {
+    const me = String(req.user.id);
+    const isMine = String(result.booking.booked_by) === me || String(result.booking.referred_by) === me;
+    if (!isMine) return res.status(403).json({ success: false, message: 'Not your booking' });
+  }
+
+  res.json({
+    success: true,
+    token: result.token,
+    verifyUrl: result.verifyUrl,
+    receiptNo: result.receiptNo,
+    payload: result.payload,
+  });
+});
+
+// Public counterpart — used by the website right after a Razorpay payment
+// completes. Knowing the booking UUID is the gate (UUIDs are unguessable),
+// and the response also includes booking + payments so the website can
+// render the same PDF without an additional auth'd round-trip.
+export const getPublicBookingReceiptToken = asyncHandler(async (req, res) => {
+  const result = await buildSignedReceiptForBooking(req.params.id);
+  if (!result.booking) return res.status(404).json({ success: false, message: 'Booking not found' });
+
+  res.json({
+    success: true,
+    token: result.token,
+    verifyUrl: result.verifyUrl,
+    receiptNo: result.receiptNo,
+    payload: result.payload,
+    booking: result.booking,
+    payments: result.payments,
+    paymentSummary: result.summary,
+  });
 });
