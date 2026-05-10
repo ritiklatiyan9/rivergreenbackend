@@ -19,6 +19,7 @@ export const SIDEBAR_MODULES = [
   { key: 'chat',              label: 'Chat',               defaultRoles: ['ADMIN', 'OWNER'] },
   { key: 'bookings',          label: 'Bookings & Sales',   defaultRoles: ['ADMIN', 'OWNER'] },
   { key: 'tasks',             label: 'Task Management',    defaultRoles: ['ADMIN', 'OWNER', 'SUPERVISOR'] },
+  { key: 'hr',                label: 'HR Management',      defaultRoles: ['ADMIN', 'OWNER'] },
   { key: 'settings',          label: 'Settings',           defaultRoles: ['ADMIN', 'OWNER'] },
 ];
 

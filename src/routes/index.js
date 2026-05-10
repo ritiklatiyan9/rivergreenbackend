@@ -30,6 +30,7 @@ import stockRoutes from './stock.routes.js';
 import supervisorRoutes from './supervisor.routes.js';
 import supervisionTaskRoutes from './supervisionTask.routes.js';
 import sidebarPermissionRoutes from './sidebarPermission.routes.js';
+import hrRoutes from './hr.routes.js';
 import { ldAuthRouter, ldRouter, ldAdminRouter } from './luckyDraw.routes.js';
 
 router.use('/auth', authRoutes);
@@ -61,6 +62,7 @@ router.use('/stocks', stockRoutes);
 router.use('/supervisors', supervisorRoutes);
 router.use('/supervision-tasks', supervisionTaskRoutes);
 router.use('/admin/sidebar-permissions', sidebarPermissionRoutes);
+router.use('/hr', hrRoutes);
 
 // Lucky Draw module
 router.use('/ld-auth', ldAuthRouter);      // Lucky Draw login surface
