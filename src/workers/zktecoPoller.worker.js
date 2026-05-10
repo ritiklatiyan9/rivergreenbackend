@@ -16,6 +16,7 @@ import { reducePunches } from '../utils/zktecoPunchReducer.js';
 import { attendanceLocationModel, attendanceRecordModel } from '../models/Attendance.model.js';
 import userModel from '../models/User.model.js';
 import { bustCache } from '../middlewares/cache.middleware.js';
+import { notifyAttendancePunch } from '../services/attendanceNotifier.service.js';
 
 const POLL_INTERVAL_MS = parseInt(process.env.ZKTECO_POLL_INTERVAL_MS || '30000', 10);
 
@@ -76,7 +77,14 @@ const pollLocation = async (location) => {
   for (const u of upserts) {
     try {
       const record = await attendanceRecordModel.upsertFromPunch(u, pool);
-      if (record) emitAttendancePunch(record);
+      if (record) {
+        emitAttendancePunch(record);
+        // The reducer hands us either a single check-in (checkOut === null)
+        // or a closed in/out pair (checkOut set) — pass the action explicitly
+        // so the notification body says the right verb.
+        const action = u.checkOut ? 'CHECK_OUT' : 'CHECK_IN';
+        notifyAttendancePunch(record, { channel: 'BIOMETRIC_POLL', action });
+      }
     } catch (err) {
       errlog(`location ${location.id} user ${u.userId}: upsert failed — ${err.message}`);
     }

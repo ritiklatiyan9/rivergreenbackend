@@ -19,6 +19,7 @@ import userModel from '../models/User.model.js';
 import { attendanceRecordModel } from '../models/Attendance.model.js';
 import { parseAttLog, parseDeviceInfo } from '../services/admsParser.js';
 import { shouldSyncClock, buildSetTimeCommand } from '../services/admsClockSync.js';
+import { notifyAttendancePunch } from '../services/attendanceNotifier.service.js';
 
 const log = (...a) => console.log('[adms]', ...a);
 const errlog = (...a) => console.error('[adms]', ...a);
@@ -179,6 +180,8 @@ export const pushData = asyncHandler(async (req, res) => {
       if (record) {
         applied++;
         try { emitAttendancePunch(record); } catch { /* socket.io optional */ }
+        // Detailed FCM to admins for this single push punch (fire-and-forget).
+        notifyAttendancePunch(record, { channel: 'BIOMETRIC_PUSH' });
       }
     } catch (err) {
       errlog(`append failed user=${user.id} punch=${punch.time?.toISOString()}: ${err.message}`);
