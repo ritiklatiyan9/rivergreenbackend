@@ -17,8 +17,8 @@ import { bustCache } from '../middlewares/cache.middleware.js';
 import { emitAttendancePunch } from '../config/socket.js';
 import userModel from '../models/User.model.js';
 import { attendanceRecordModel } from '../models/Attendance.model.js';
-import { reducePunches } from '../utils/zktecoPunchReducer.js';
 import { parseAttLog, parseDeviceInfo } from '../services/admsParser.js';
+import { shouldSyncClock, buildSetTimeCommand } from '../services/admsClockSync.js';
 
 const log = (...a) => console.log('[adms]', ...a);
 const errlog = (...a) => console.error('[adms]', ...a);
@@ -130,16 +130,68 @@ export const pushData = asyncHandler(async (req, res) => {
     return sendText(res, 200, 'OK: 0');
   }
 
+  // Build the device→app user map once per request.
   const userMap = await userModel.buildZktecoUserMapForLocation(location.id, pool);
-  const { upserts, unmapped } = reducePunches(rows, location, userMap);
 
-  if (unmapped.length > 0) {
+  // We bypass the legacy reducer here: each ADMS push delivers one punch,
+  // and appendBiometricPunch knows how to fold it into the sessions array
+  // for that day (open new session vs close current). Pull-mode poller
+  // continues to use the old reducer path.
+  const toDateKey = (d) => {
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  };
+  const isLate = (d, officeStart) => {
+    if (!officeStart) return false;
+    const [h, m] = String(officeStart).split(':').map(Number);
+    const cutoff = new Date(d);
+    cutoff.setHours(h, m || 0, 0, 0);
+    return d > cutoff;
+  };
+
+  let applied = 0;
+  const unmappedToInsert = [];
+  for (const punch of rows) {
+    const user = userMap.get(punch.zktecoUserId);
+    if (!user) {
+      unmappedToInsert.push(punch);
+      continue;
+    }
+    const isSecondary = !!(user.primary_site_id
+      && location.site_id
+      && String(user.primary_site_id) !== String(location.site_id));
+    try {
+      const record = await attendanceRecordModel.appendBiometricPunch(
+        {
+          userId: user.id,
+          locationId: location.id,
+          dateKey: toDateKey(punch.time),
+          punchTime: punch.time,
+          status: isLate(punch.time, location.office_start_time) ? 'LATE' : 'PRESENT',
+          isSecondary,
+          source: 'BIOMETRIC',
+          raw: { line: punch.raw?.line, status: punch.type, verify: punch.verify, workcode: punch.workcode },
+        },
+        pool,
+      );
+      if (record) {
+        applied++;
+        try { emitAttendancePunch(record); } catch { /* socket.io optional */ }
+      }
+    } catch (err) {
+      errlog(`append failed user=${user.id} punch=${punch.time?.toISOString()}: ${err.message}`);
+    }
+  }
+
+  if (unmappedToInsert.length > 0) {
     const values = [];
     const placeholders = [];
     let i = 1;
-    for (const u of unmapped) {
+    for (const u of unmappedToInsert) {
       placeholders.push(`($${i++}, $${i++}, $${i++}, $${i++}, $${i++})`);
-      values.push(u.locationId, u.zktecoUserId, u.time, u.type ?? null, u.raw ?? null);
+      values.push(location.id, u.zktecoUserId, u.time, u.type ?? null, u.raw ?? null);
     }
     try {
       await pool.query(
@@ -149,19 +201,6 @@ export const pushData = asyncHandler(async (req, res) => {
       );
     } catch (err) {
       errlog(`unmapped insert failed: ${err.message}`);
-    }
-  }
-
-  let applied = 0;
-  for (const u of upserts) {
-    try {
-      const record = await attendanceRecordModel.upsertFromPunch(u, pool);
-      if (record) {
-        applied++;
-        try { emitAttendancePunch(record); } catch { /* socket.io optional */ }
-      }
-    } catch (err) {
-      errlog(`upsert failed user=${u.userId}: ${err.message}`);
     }
   }
 
@@ -182,14 +221,31 @@ export const getRequest = asyncHandler(async (req, res) => {
   const sn = req.query.SN;
   const info = parseDeviceInfo(req.query.INFO);
   const location = await findLocationBySerial(sn);
-  if (location) {
-    await updateHeartbeat(location.id, {
-      firmware: info.Ver || info.FWVer || null,
-      userCount: info.UserCount != null ? parseInt(info.UserCount, 10) : undefined,
-      punchCount: info.TransactionCount != null ? parseInt(info.TransactionCount, 10) : undefined,
-    });
+  if (!location) {
+    return sendText(res, 200, 'OK');
   }
-  // Empty body = "no commands queued". Device retries on TransInterval.
+
+  await updateHeartbeat(location.id, {
+    firmware: info.Ver || info.FWVer || null,
+    userCount: info.UserCount != null ? parseInt(info.UserCount, 10) : undefined,
+    punchCount: info.TransactionCount != null ? parseInt(info.TransactionCount, 10) : undefined,
+  });
+
+  // Time-sync: piggy-back on the heartbeat. We push a SET DateTime command
+  // when last sync was > 6h ago (or never). Mark sync as sent immediately
+  // (optimistic) so a chain of heartbeats during a slow ack can't repeat
+  // it. If the device fails the command, the next 6h cycle re-issues.
+  if (shouldSyncClock(location.adms_last_time_sync_at)) {
+    await pool.query(
+      `UPDATE attendance_locations SET adms_last_time_sync_at = NOW() WHERE id = $1`,
+      [location.id],
+    );
+    const cmd = buildSetTimeCommand();
+    log(`clock-sync → SN=${sn}: ${cmd}`);
+    return sendText(res, 200, cmd);
+  }
+
+  // No commands queued. Device retries on TransInterval.
   sendText(res, 200, 'OK');
 });
 

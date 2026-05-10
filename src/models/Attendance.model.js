@@ -1,4 +1,5 @@
 import MasterModel from './MasterModel.js';
+import { appendPunchToSessions, denormalizeSessions } from '../utils/sessionAppend.js';
 
 class AttendanceLocationModel extends MasterModel {
   constructor() {
@@ -194,6 +195,93 @@ class AttendanceRecordModel extends MasterModel {
   }
 
   /**
+   * Append one biometric punch to the day's session timeline.
+   *
+   * The day's `sessions` JSONB array is the source of truth — it stores
+   * every distinct in/out as { in, out } pairs so multiple visits per day
+   * can be reconstructed exactly. `check_in_time` and `check_out_time` are
+   * denormalized first-in / last-completed-out for backward-compatible
+   * queries.
+   *
+   * Alternation logic:
+   *   - No sessions yet, or last session is closed (has `out`)  → start new
+   *     session with `in = punchTime`, `out = null`.
+   *   - Last session is open (`out` is null) and punchTime is later than
+   *     `last.in` → close it (`out = punchTime`).
+   *   - Out-of-order punch (earlier than open `in`) → push as new earlier
+   *     session and re-sort. Rare, but keeps history intact.
+   *
+   * Debounce: any new punch within `debounceMs` of an existing in/out is
+   * dropped (treated as a duplicate scan).
+   *
+   * Wrapped in a transaction with SELECT ... FOR UPDATE so concurrent
+   * punches at the same instant don't lose each other.
+   */
+  async appendBiometricPunch(
+    { userId, locationId, dateKey, punchTime, status, isSecondary, source, raw },
+    pool,
+    opts = {},
+  ) {
+    const debounceMs = opts.debounceMs ?? 10_000;
+    const tn = this.tableName;
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const existing = await client.query(
+        `SELECT id, sessions FROM ${tn}
+         WHERE user_id = $1 AND location_id = $2 AND date = $3
+         FOR UPDATE`,
+        [userId, locationId, dateKey],
+      );
+
+      const { sessions, changed } = appendPunchToSessions(
+        existing.rows[0]?.sessions,
+        punchTime,
+        { debounceMs },
+      );
+      if (!changed) {
+        await client.query('COMMIT');
+        return null;
+      }
+      const { firstIn, lastOut } = denormalizeSessions(sessions);
+
+      let result;
+      if (existing.rows.length === 0) {
+        result = await client.query(
+          `INSERT INTO ${tn}
+            (user_id, location_id, date, check_in_time, check_out_time, status, is_secondary, source, raw_zkteco, sessions)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           RETURNING *`,
+          [userId, locationId, dateKey, firstIn, lastOut, status, isSecondary, source, raw, JSON.stringify(sessions)],
+        );
+      } else {
+        result = await client.query(
+          `UPDATE ${tn} SET
+             check_in_time = $1,
+             check_out_time = $2,
+             sessions = $3,
+             status = CASE WHEN status = 'LATE' OR $4 = 'LATE' THEN 'LATE' ELSE status END,
+             is_secondary = $5,
+             source = $6,
+             raw_zkteco = $7,
+             updated_at = NOW()
+           WHERE id = $8 RETURNING *`,
+          [firstIn, lastOut, JSON.stringify(sessions), status, isSecondary, source, raw, existing.rows[0].id],
+        );
+      }
+
+      await client.query('COMMIT');
+      return result.rows[0];
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => null);
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
    * Idempotent upsert for one biometric punch. Per the unique
    * (user_id, location_id, date) constraint there is at most one row.
    *
@@ -323,7 +411,7 @@ class AttendanceRecordModel extends MasterModel {
   /** Get a user's per-location movement timeline for one date. */
   async findUserMovementByDate(userId, date, pool) {
     const result = await pool.query(`
-      SELECT ar.id, ar.location_id, ar.check_in_time, ar.check_out_time, ar.is_secondary,
+      SELECT ar.id, ar.location_id, ar.check_in_time, ar.check_out_time, ar.sessions, ar.is_secondary,
              al.name as location_name
       FROM ${this.tableName} ar
       JOIN attendance_locations al ON ar.location_id = al.id
