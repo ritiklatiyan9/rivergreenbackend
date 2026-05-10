@@ -24,6 +24,14 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'x-refresh-token', 'x-site-id'],
 }));
 app.use(cookieParser());
+
+// ZKTeco ADMS (Push SDK) endpoints — mounted BEFORE the global JSON body
+// parser so the device's tab-separated raw body reaches the route's
+// text-parser intact. Public, no auth (device has no JWT — auth is by
+// matching the SN query parameter against attendance_locations).
+import admsRoutes from './routes/adms.routes.js';
+app.use('/iclock', admsRoutes);
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(httpCacheHeaders(30));

@@ -409,8 +409,9 @@ export const getPublicSitePlots = async (req, res) => {
         }
 
         const plotsRes = await pool.query(
-            `SELECT mp.id, mp.plot_number, mp.status, mp.area_sqft, mp.dimensions,
-                    mp.facing, mp.total_price, mp.price_per_sqft, mp.block, mp.plot_type,
+            `SELECT mp.id, mp.plot_number, mp.status, mp.area_sqft, mp.area_sqm,
+                    mp.dimensions, mp.facing, mp.total_price, mp.price_per_sqft,
+                    mp.block, mp.plot_type, mp.notes, mp.documents,
                     mp.colony_map_id, cm.name as colony_name
              FROM map_plots mp
              JOIN colony_maps cm ON mp.colony_map_id = cm.id

@@ -10,7 +10,8 @@ import * as poller from '../workers/zktecoPoller.worker.js';
 export const listDevices = asyncHandler(async (req, res) => {
   const locations = await attendanceLocationModel.findAllWithCreator(pool);
   const devices = locations
-    .filter((l) => l.zkteco_enabled || l.zkteco_ip)
+    // ADMS push-mode devices only need a serial (no IP), so include those too.
+    .filter((l) => l.zkteco_enabled || l.zkteco_ip || l.zkteco_serial)
     .map((l) => ({
       location_id: l.id,
       name: l.name,
@@ -22,6 +23,12 @@ export const listDevices = asyncHandler(async (req, res) => {
       last_synced_at: l.zkteco_last_synced_at,
       last_log_id: l.zkteco_last_log_id,
       last_error: l.zkteco_last_error,
+      // ADMS (push) mode status
+      adms_last_heartbeat: l.adms_last_heartbeat,
+      adms_firmware: l.adms_firmware,
+      adms_user_count: l.adms_user_count,
+      adms_punch_count: l.adms_punch_count,
+      adms_last_error: l.adms_last_error,
     }));
   res.json({ success: true, devices, poller: poller.status() });
 });
