@@ -146,6 +146,93 @@ export const updateUserSalary = asyncHandler(async (req, res) => {
 // HR ATTENDANCE CALENDAR + LEAVES
 // ═══════════════════════════════════════════════════════
 
+// All-users monthly attendance matrix. One round-trip for attendance + leaves
+// across every active panel-user, run through the same computeMonthlySalary
+// service so the cell colors line up with the per-user calendar.
+export const getAttendanceCalendarBulk = asyncHandler(async (req, res) => {
+  const yYm = validYearMonth(req.query.year, req.query.month);
+  if (!yYm) return res.status(400).json({ success: false, message: 'year and month are required' });
+  const siteId = req.user?.site_id || null;
+
+  const settings = siteId ? await hrSettingsModel.findOrCreateBySite(siteId, req.user.id, pool) : null;
+  if (!settings) return res.status(400).json({ success: false, message: 'Site HR settings missing' });
+
+  const usersRes = await pool.query(
+    `SELECT u.id, u.name, u.email, u.role, u.profile_photo,
+            us.monthly_salary, us.joined_at
+     FROM users u
+     LEFT JOIN user_salaries us ON us.user_id = u.id AND us.effective_to IS NULL
+     WHERE u.is_active = true
+       AND u.role IN ('ADMIN','SUPERVISOR','TEAM_HEAD','AGENT')
+       ${siteId ? `AND u.site_id = $1` : ``}
+     ORDER BY u.name ASC`,
+    siteId ? [siteId] : [],
+  );
+
+  const userIds = usersRes.rows.map((u) => u.id);
+  const { start, end } = monthBounds(yYm.year, yYm.month);
+
+  const [attRes, lvRes] = userIds.length > 0
+    ? await Promise.all([
+        pool.query(
+          `SELECT user_id, date, status, check_in_time, check_out_time, is_secondary
+           FROM attendance_records
+           WHERE date BETWEEN $1 AND $2 AND user_id = ANY($3::uuid[])`,
+          [start, end, userIds],
+        ),
+        pool.query(
+          `SELECT user_id, id, leave_date, leave_type, reason
+           FROM hr_leave_records
+           WHERE leave_date BETWEEN $1 AND $2 AND user_id = ANY($3::uuid[])`,
+          [start, end, userIds],
+        ),
+      ])
+    : [{ rows: [] }, { rows: [] }];
+
+  const attByUser = new Map();
+  for (const r of attRes.rows) {
+    if (!attByUser.has(r.user_id)) attByUser.set(r.user_id, []);
+    attByUser.get(r.user_id).push(r);
+  }
+  const lvByUser = new Map();
+  for (const r of lvRes.rows) {
+    if (!lvByUser.has(r.user_id)) lvByUser.set(r.user_id, []);
+    lvByUser.get(r.user_id).push(r);
+  }
+
+  const users = usersRes.rows.map((u) => {
+    const calc = computeMonthlySalary({
+      userId: u.id,
+      year: yYm.year,
+      month: yYm.month,
+      hrSettings: settings,
+      monthlySalary: u.monthly_salary || 0,
+      attendance: attByUser.get(u.id) || [],
+      leaves: lvByUser.get(u.id) || [],
+      joinedAt: u.joined_at,
+    });
+    return {
+      user: { id: u.id, name: u.name, email: u.email, role: u.role, profile_photo: u.profile_photo },
+      monthly_salary: u.monthly_salary,
+      breakdown: calc.breakdown,
+      summary: {
+        total_working_days: calc.total_working_days,
+        present_days: calc.present_days,
+        late_days: calc.late_days,
+        half_days: calc.half_days,
+        absent_days: calc.absent_days,
+        paid_leaves_used: calc.paid_leaves_used,
+        unpaid_leaves: calc.unpaid_leaves,
+        payable_days: calc.payable_days,
+        per_day_rate: calc.per_day_rate,
+        suggested_amount: calc.suggested_amount,
+      },
+    };
+  });
+
+  res.json({ success: true, year: yYm.year, month: yYm.month, settings, users });
+});
+
 export const getAttendanceCalendar = asyncHandler(async (req, res) => {
   const { userId } = req.params;
   const yYm = validYearMonth(req.query.year, req.query.month);

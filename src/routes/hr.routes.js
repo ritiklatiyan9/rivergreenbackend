@@ -9,6 +9,7 @@ import {
   getUserSalary,
   updateUserSalary,
   getAttendanceCalendar,
+  getAttendanceCalendarBulk,
   upsertLeave,
   deleteLeave,
   suggestPayrollAll,
@@ -34,6 +35,7 @@ router.get('/salaries/:userId',  adminOnly, getUserSalary);
 router.put('/salaries/:userId',  adminOnly, updateUserSalary);
 
 // Calendar + leaves
+router.get('/attendance-calendar/all',     adminOnly, getAttendanceCalendarBulk);
 router.get('/attendance-calendar/:userId', adminOnly, getAttendanceCalendar);
 router.post('/leaves',                     adminOnly, upsertLeave);
 router.delete('/leaves',                   adminOnly, deleteLeave);

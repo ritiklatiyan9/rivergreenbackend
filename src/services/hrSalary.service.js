@@ -26,6 +26,22 @@ const ymd = (d) => {
   return `${y}-${m}-${dd}`;
 };
 
+// pg returns DATE columns as JS Date objects representing local-midnight in
+// the server's tz; plain `String(date)` produces "Sat May 10 2026 …" which
+// breaks YYYY-MM-DD matching. Use the local components instead — those
+// preserve the actual stored calendar date regardless of server tz.
+const toDateKey = (v) => {
+  if (!v) return null;
+  if (v instanceof Date) return ymd(v);
+  const s = String(v);
+  // ISO-ish string: take the YYYY-MM-DD prefix verbatim.
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  // Fall back to parsing.
+  const parsed = new Date(s);
+  if (!Number.isNaN(parsed.getTime())) return ymd(parsed);
+  return s.slice(0, 10);
+};
+
 const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 
 /**
@@ -66,7 +82,8 @@ export function computeMonthlySalary({
   // record; fall back to a secondary one only if no primary exists.
   const attMap = new Map();
   for (const r of attendance) {
-    const key = String(r.date).slice(0, 10);
+    const key = toDateKey(r.date);
+    if (!key) continue;
     const existing = attMap.get(key);
     if (!existing || (existing.is_secondary && !r.is_secondary)) {
       attMap.set(key, r);
@@ -75,7 +92,10 @@ export function computeMonthlySalary({
 
   // Index leaves by date.
   const leaveMap = new Map();
-  for (const l of leaves) leaveMap.set(String(l.leave_date).slice(0, 10), l);
+  for (const l of leaves) {
+    const key = toDateKey(l.leave_date);
+    if (key) leaveMap.set(key, l);
+  }
 
   const joinDate = joinedAt ? new Date(`${String(joinedAt).slice(0, 10)}T00:00:00`) : null;
   const today = new Date();
