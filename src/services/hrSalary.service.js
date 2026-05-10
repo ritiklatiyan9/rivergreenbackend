@@ -137,18 +137,25 @@ export function computeMonthlySalary({
     if (beforeJoin) {
       status = 'BEFORE_JOIN';
       counts = false;
-    } else if (isHoliday) {
-      status = HOLIDAY_KEY;
+    } else if (isHoliday || isWeekOff) {
+      // Paid regardless of attendance. Holidays falling on a working DOW
+      // reduce the divisor (employee shouldn't be paid less because the
+      // company gave a holiday).
       payable = 1;
-      holidaysCount += 1;
-      // Holidays falling on a working DOW reduce the divisor (employee
-      // shouldn't be paid less because the company gave a holiday).
       counts = false;
-    } else if (isWeekOff) {
-      status = WEEKOFF_KEY;
-      payable = 1;
-      weekoffCount += 1;
-      counts = false;
+      if (isHoliday) holidaysCount += 1; else weekoffCount += 1;
+
+      // If the user actually came in on a week-off / holiday, surface that
+      // in the present/late/half counters AND mark the cell with a distinct
+      // status so the calendar can show the extra-effort visually.
+      if (att && att.status !== 'ABSENT') {
+        if (att.status === 'HALF_DAY') halfDays += 1;
+        else if (att.status === 'LATE') { lateDays += 1; presentDays += 1; }
+        else presentDays += 1;
+        status = isHoliday ? 'HOLIDAY_WORKED' : 'WEEK_OFF_WORKED';
+      } else {
+        status = isHoliday ? HOLIDAY_KEY : WEEKOFF_KEY;
+      }
     } else {
       // Working day. Decide via leave override > attendance.
       totalWorkingDays += 1;
