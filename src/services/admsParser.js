@@ -55,18 +55,35 @@ export function parseAttLog(body) {
 }
 
 /**
- * Parse the device's INFO query string (sent on getrequest heartbeat) into a
- * plain object. Format: "Ver=6.60.1.0,Push=2.4.1.10,UserCount=12,FPCount=24"
+ * Parse the device's INFO query string from getrequest heartbeats.
+ *
+ * Two formats observed in the wild:
+ *   1) Old: "Ver=6.60.1.0,Push=2.4.1.10,UserCount=12,FPCount=24"
+ *   2) Newer (K40 Pro fw 8.x): "Ver 8.0.4.3-20230515,2,2,19,192.168.31.216,..."
+ *      — positional CSV, with firmware prefixed by "Ver " (space, not =).
+ *
+ * For format 2 the only stable field is the firmware in slot 0; the
+ * remaining slots vary by firmware family so we don't attempt to interpret
+ * them.
  */
 export function parseDeviceInfo(infoStr) {
   if (!infoStr) return {};
   const out = {};
-  for (const pair of String(infoStr).split(/[,;]/)) {
+  const parts = String(infoStr).split(/[,;]/);
+  for (let i = 0; i < parts.length; i++) {
+    const pair = parts[i];
     const eq = pair.indexOf('=');
-    if (eq <= 0) continue;
-    const k = pair.slice(0, eq).trim();
-    const v = pair.slice(eq + 1).trim();
-    if (k) out[k] = v;
+    if (eq > 0) {
+      const k = pair.slice(0, eq).trim();
+      const v = pair.slice(eq + 1).trim();
+      if (k) out[k] = v;
+      continue;
+    }
+    // Positional fallback: slot 0 may be "Ver X.Y.Z" — recover the firmware.
+    if (i === 0) {
+      const m = pair.trim().match(/^Ver\s+(.+)$/i);
+      if (m) out.Ver = m[1].trim();
+    }
   }
   return out;
 }

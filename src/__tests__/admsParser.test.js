@@ -58,3 +58,9 @@ test('parseDeviceInfo handles empty/missing input', () => {
   assert.deepEqual(parseDeviceInfo(null), {});
   assert.deepEqual(parseDeviceInfo('justastring'), {});
 });
+
+test('parseDeviceInfo extracts firmware from positional CSV (K40 Pro fw 8.x)', () => {
+  // Real-world payload from the user's GED7253500473.
+  const info = parseDeviceInfo('Ver 8.0.4.3-20230515,2,2,19,192.168.31.216,10,-1,0,0,101,1,0,0');
+  assert.equal(info.Ver, '8.0.4.3-20230515');
+});

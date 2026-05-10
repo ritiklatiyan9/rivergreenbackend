@@ -195,24 +195,39 @@ class AttendanceRecordModel extends MasterModel {
 
   /**
    * Idempotent upsert for one biometric punch. Per the unique
-   * (user_id, location_id, date) constraint there is at most one row;
-   * this method either creates it or updates check_out_time to the
-   * latest punch and ratchets the status if it became LATE.
+   * (user_id, location_id, date) constraint there is at most one row.
+   *
+   * check_in_time  → earliest punch we've ever seen for this bucket.
+   * check_out_time → latest distinct punch (NULL until a *second* time arrives).
+   *
+   * Why GREATEST over four candidates with a NULLIF guard:
+   * ADMS push-mode delivers one punch per HTTP request, so each call has
+   * checkOut=NULL in the reducer output. We still need the SECOND such
+   * call to promote its punch into check_out_time on the existing row —
+   * `GREATEST(...)` of all four timestamps does that, and `NULLIF(max, min)`
+   * keeps check_out NULL when only one distinct time has been observed
+   * (so a single duplicate-punch doesn't fake a 0-duration shift).
    */
   async upsertFromPunch({ userId, locationId, dateKey, checkIn, checkOut, status, isSecondary, source, raw }, pool) {
+    const tn = this.tableName;
     const result = await pool.query(
-      `INSERT INTO ${this.tableName}
+      `INSERT INTO ${tn}
         (user_id, location_id, date, check_in_time, check_out_time, status, is_secondary, source, raw_zkteco)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (user_id, location_id, date) DO UPDATE SET
-         check_in_time   = LEAST(${this.tableName}.check_in_time, EXCLUDED.check_in_time),
-         check_out_time  = GREATEST(
-                             COALESCE(${this.tableName}.check_out_time, EXCLUDED.check_out_time),
-                             COALESCE(EXCLUDED.check_out_time, ${this.tableName}.check_out_time)
+         check_in_time   = LEAST(${tn}.check_in_time, EXCLUDED.check_in_time),
+         check_out_time  = NULLIF(
+                             GREATEST(
+                               ${tn}.check_in_time,
+                               ${tn}.check_out_time,
+                               EXCLUDED.check_in_time,
+                               EXCLUDED.check_out_time
+                             ),
+                             LEAST(${tn}.check_in_time, EXCLUDED.check_in_time)
                            ),
          status          = CASE
-                             WHEN ${this.tableName}.status = 'LATE' OR EXCLUDED.status = 'LATE' THEN 'LATE'
-                             ELSE ${this.tableName}.status
+                             WHEN ${tn}.status = 'LATE' OR EXCLUDED.status = 'LATE' THEN 'LATE'
+                             ELSE ${tn}.status
                            END,
          is_secondary    = EXCLUDED.is_secondary,
          source          = EXCLUDED.source,
