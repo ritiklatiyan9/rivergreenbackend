@@ -21,7 +21,12 @@ const VALID_ROLES = ['TEAM_HEAD', 'AGENT'];
 // Get current admin's site info
 export const getMySite = asyncHandler(async (req, res) => {
   const user = await userModel.findById(req.user.id, pool);
-  if (user && !user.site_id && req.user?.site_id) user.site_id = req.user.site_id;
+  // Always trust the request's effective site (resolved by auth middleware
+  // from the x-site-id header) over the DB-persisted column. Otherwise an
+  // optimistic switch on the FE — where x-site-id flips before the PUT
+  // /auth/active-site round trip persists user.site_id — would silently
+  // serve data for the old site.
+  if (user && req.user?.site_id) user.site_id = req.user.site_id;
   if (!user || !user.site_id) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }
@@ -37,7 +42,12 @@ export const getMySite = asyncHandler(async (req, res) => {
 // Get dashboard stats for admin's site
 export const getSiteStats = asyncHandler(async (req, res) => {
   const user = await userModel.findById(req.user.id, pool);
-  if (user && !user.site_id && req.user?.site_id) user.site_id = req.user.site_id;
+  // Always trust the request's effective site (resolved by auth middleware
+  // from the x-site-id header) over the DB-persisted column. Otherwise an
+  // optimistic switch on the FE — where x-site-id flips before the PUT
+  // /auth/active-site round trip persists user.site_id — would silently
+  // serve data for the old site.
+  if (user && req.user?.site_id) user.site_id = req.user.site_id;
   if (!user || !user.site_id) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }
@@ -58,7 +68,7 @@ export const getSiteStats = asyncHandler(async (req, res) => {
 // List all users in admin's site (with optional role filter)
 export const listSiteUsers = asyncHandler(async (req, res) => {
   const adminUser = await userModel.findById(req.user.id, pool);
-  if (adminUser && !adminUser.site_id && req.user?.site_id) adminUser.site_id = req.user.site_id;
+  if (adminUser && req.user?.site_id) adminUser.site_id = req.user.site_id;
   if (!adminUser || !adminUser.site_id) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }
@@ -80,7 +90,7 @@ export const getSiteUser = asyncHandler(async (req, res) => {
   const { id } = req.params;
 
   const adminUser = await userModel.findById(req.user.id, pool);
-  if (adminUser && !adminUser.site_id && req.user?.site_id) adminUser.site_id = req.user.site_id;
+  if (adminUser && req.user?.site_id) adminUser.site_id = req.user.site_id;
   if (!adminUser || !adminUser.site_id) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }
@@ -134,7 +144,7 @@ export const createSiteUser = asyncHandler(async (req, res) => {
   }
 
   const adminUser = await userModel.findById(req.user.id, pool);
-  if (adminUser && !adminUser.site_id && req.user?.site_id) adminUser.site_id = req.user.site_id;
+  if (adminUser && req.user?.site_id) adminUser.site_id = req.user.site_id;
   if (!adminUser || !adminUser.site_id) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }
@@ -239,7 +249,7 @@ export const updateSiteUser = asyncHandler(async (req, res) => {
   const { name, email, password, phone, role, is_active, sponsor_code: sponsorRefCode, profile_photo, category_id, profile_data, team_id } = req.body;
 
   const adminUser = await userModel.findById(req.user.id, pool);
-  if (adminUser && !adminUser.site_id && req.user?.site_id) adminUser.site_id = req.user.site_id;
+  if (adminUser && req.user?.site_id) adminUser.site_id = req.user.site_id;
   if (!adminUser || !adminUser.site_id) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }
@@ -319,7 +329,7 @@ export const deleteSiteUser = asyncHandler(async (req, res) => {
   const { id } = req.params;
 
   const adminUser = await userModel.findById(req.user.id, pool);
-  if (adminUser && !adminUser.site_id && req.user?.site_id) adminUser.site_id = req.user.site_id;
+  if (adminUser && req.user?.site_id) adminUser.site_id = req.user.site_id;
   if (!adminUser || !adminUser.site_id) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }
@@ -343,7 +353,7 @@ export const getUserDownline = asyncHandler(async (req, res) => {
   const { id } = req.params;
 
   const adminUser = await userModel.findById(req.user.id, pool);
-  if (adminUser && !adminUser.site_id && req.user?.site_id) adminUser.site_id = req.user.site_id;
+  if (adminUser && req.user?.site_id) adminUser.site_id = req.user.site_id;
   if (!adminUser || !adminUser.site_id) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }
@@ -367,7 +377,7 @@ export const getUserDownline = asyncHandler(async (req, res) => {
 // Get team heads for dropdown
 export const getTeamHeads = asyncHandler(async (req, res) => {
   const adminUser = await userModel.findById(req.user.id, pool);
-  if (adminUser && !adminUser.site_id && req.user?.site_id) adminUser.site_id = req.user.site_id;
+  if (adminUser && req.user?.site_id) adminUser.site_id = req.user.site_id;
   if (!adminUser || !adminUser.site_id) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }
@@ -379,7 +389,7 @@ export const getTeamHeads = asyncHandler(async (req, res) => {
 // Get agents for dropdown
 export const getAgents = asyncHandler(async (req, res) => {
   const adminUser = await userModel.findById(req.user.id, pool);
-  if (adminUser && !adminUser.site_id && req.user?.site_id) adminUser.site_id = req.user.site_id;
+  if (adminUser && req.user?.site_id) adminUser.site_id = req.user.site_id;
   if (!adminUser || !adminUser.site_id) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }
@@ -401,7 +411,7 @@ export const searchSiteUsers = asyncHandler(async (req, res) => {
   const limitVal = Math.min(Math.max(1, parseInt(limit, 10) || 8), 20);
 
   const adminUser = await userModel.findById(req.user.id, pool);
-  if (adminUser && !adminUser.site_id && req.user?.site_id) adminUser.site_id = req.user.site_id;
+  if (adminUser && req.user?.site_id) adminUser.site_id = req.user.site_id;
   if (!adminUser || !adminUser.site_id) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }
@@ -428,7 +438,7 @@ export const searchSiteUsers = asyncHandler(async (req, res) => {
 // Get leads for dropdowns (call module)
 export const getLeads = asyncHandler(async (req, res) => {
   const adminUser = await userModel.findById(req.user.id, pool);
-  if (adminUser && !adminUser.site_id && req.user?.site_id) adminUser.site_id = req.user.site_id;
+  if (adminUser && req.user?.site_id) adminUser.site_id = req.user.site_id;
   if (!adminUser || !adminUser.site_id) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }

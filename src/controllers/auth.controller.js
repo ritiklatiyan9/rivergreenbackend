@@ -6,6 +6,7 @@ import pool from '../config/db.js';
 import { uploadSingle } from '../utils/upload.js';
 import { ensureUserSiteAccessTable, getUserAssignedSiteIds } from '../utils/userSiteAccess.js';
 import fcmService from '../services/fcm.service.js';
+import { bustCache } from '../middlewares/cache.middleware.js';
 
 const REFRESH_COOKIE_OPTIONS = {
   httpOnly: true,
@@ -337,6 +338,12 @@ export const setActiveSite = asyncHandler(async (req, res) => {
     site_id: nextSite.id,
     version: updatedUser.token_version,
   });
+
+  // Bust every cached response keyed to this user — entries for either the
+  // old site (now stale) or the new site (possibly poisoned by older buggy
+  // controllers that ignored x-site-id) are both wiped. Fire-and-forget; the
+  // response is independent.
+  bustCache(`cache:${user.id}:*`).catch(() => {});
 
   res.json({
     success: true,

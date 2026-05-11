@@ -23,7 +23,7 @@ export const createTeam = asyncHandler(async (req, res) => {
   }
 
   const adminUser = await userModel.findById(req.user.id, pool);
-  if (adminUser && !adminUser.site_id && req.user?.site_id) adminUser.site_id = req.user.site_id;
+  if (adminUser && req.user?.site_id) adminUser.site_id = req.user.site_id;
   if (!adminUser || !adminUser.site_id) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }
@@ -41,7 +41,7 @@ export const createTeam = asyncHandler(async (req, res) => {
 // List Teams (for admin's site)
 export const listTeams = asyncHandler(async (req, res) => {
   const adminUser = await userModel.findById(req.user.id, pool);
-  if (adminUser && !adminUser.site_id && req.user?.site_id) adminUser.site_id = req.user.site_id;
+  if (adminUser && req.user?.site_id) adminUser.site_id = req.user.site_id;
   if (!adminUser || !adminUser.site_id) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }
@@ -54,7 +54,7 @@ export const listTeams = asyncHandler(async (req, res) => {
 export const getTeam = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const adminUser = await userModel.findById(req.user.id, pool);
-  if (adminUser && !adminUser.site_id && req.user?.site_id) adminUser.site_id = req.user.site_id;
+  if (adminUser && req.user?.site_id) adminUser.site_id = req.user.site_id;
   if (!adminUser || !adminUser.site_id) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }
@@ -92,7 +92,7 @@ export const updateTeam = asyncHandler(async (req, res) => {
   const { name, is_active } = req.body;
 
   const adminUser = await userModel.findById(req.user.id, pool);
-  if (adminUser && !adminUser.site_id && req.user?.site_id) adminUser.site_id = req.user.site_id;
+  if (adminUser && req.user?.site_id) adminUser.site_id = req.user.site_id;
   if (!adminUser || !adminUser.site_id) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }
@@ -120,7 +120,7 @@ export const deleteTeam = asyncHandler(async (req, res) => {
   const { id } = req.params;
 
   const adminUser = await userModel.findById(req.user.id, pool);
-  if (adminUser && !adminUser.site_id && req.user?.site_id) adminUser.site_id = req.user.site_id;
+  if (adminUser && req.user?.site_id) adminUser.site_id = req.user.site_id;
   if (!adminUser || !adminUser.site_id) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }
@@ -160,7 +160,7 @@ export const assignTeamHead = asyncHandler(async (req, res) => {
   }
 
   const adminUser = await userModel.findById(req.user.id, pool);
-  if (adminUser && !adminUser.site_id && req.user?.site_id) adminUser.site_id = req.user.site_id;
+  if (adminUser && req.user?.site_id) adminUser.site_id = req.user.site_id;
   if (!adminUser || !adminUser.site_id) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }
@@ -214,7 +214,7 @@ export const removeTeamHead = asyncHandler(async (req, res) => {
   const { user_id } = req.query || {};
 
   const adminUser = await userModel.findById(req.user.id, pool);
-  if (adminUser && !adminUser.site_id && req.user?.site_id) adminUser.site_id = req.user.site_id;
+  if (adminUser && req.user?.site_id) adminUser.site_id = req.user.site_id;
   if (!adminUser || !adminUser.site_id) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }
@@ -300,7 +300,7 @@ export const moveAgent = asyncHandler(async (req, res) => {
   }
 
   const adminUser = await userModel.findById(req.user.id, pool);
-  if (adminUser && !adminUser.site_id && req.user?.site_id) adminUser.site_id = req.user.site_id;
+  if (adminUser && req.user?.site_id) adminUser.site_id = req.user.site_id;
   if (!adminUser || !adminUser.site_id) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }
@@ -340,7 +340,7 @@ export const removeTeamMember = asyncHandler(async (req, res) => {
   const { id, userId } = req.params;
 
   const adminUser = await userModel.findById(req.user.id, pool);
-  if (adminUser && !adminUser.site_id && req.user?.site_id) adminUser.site_id = req.user.site_id;
+  if (adminUser && req.user?.site_id) adminUser.site_id = req.user.site_id;
   if (!adminUser || !adminUser.site_id) {
     return res.status(404).json({ success: false, message: 'No this site assigned' });
   }
@@ -438,7 +438,7 @@ export const registerTeamAgent = asyncHandler(async (req, res) => {
 export const getTeamMembersPerformance = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const user = await userModel.findById(req.user.id, pool);
-  if (user && !user.site_id && req.user?.site_id) user.site_id = req.user.site_id;
+  if (user && req.user?.site_id) user.site_id = req.user.site_id;
   if (!user || !user.site_id) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }
@@ -585,7 +585,7 @@ export const getTeamMembersPerformance = asyncHandler(async (req, res) => {
 
 export const getAllTeamsPerformance = asyncHandler(async (req, res) => {
   const user = await userModel.findById(req.user.id, pool);
-  if (user && !user.site_id && req.user?.site_id) user.site_id = req.user.site_id;
+  if (user && req.user?.site_id) user.site_id = req.user.site_id;
   if (!user || !user.site_id) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }
@@ -677,7 +677,7 @@ export const getTeamPerformance = asyncHandler(async (req, res) => {
   const { id } = req.params;
 
   const adminUser = await userModel.findById(req.user.id, pool);
-  if (adminUser && !adminUser.site_id && req.user?.site_id) adminUser.site_id = req.user.site_id;
+  if (adminUser && req.user?.site_id) adminUser.site_id = req.user.site_id;
   if (!adminUser || !adminUser.site_id) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }
@@ -713,7 +713,7 @@ export const setTeamTarget = asyncHandler(async (req, res) => {
   }
 
   const adminUser = await userModel.findById(req.user.id, pool);
-  if (adminUser && !adminUser.site_id && req.user?.site_id) adminUser.site_id = req.user.site_id;
+  if (adminUser && req.user?.site_id) adminUser.site_id = req.user.site_id;
   if (!adminUser || !adminUser.site_id) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }
@@ -741,7 +741,7 @@ export const getTeamTargets = asyncHandler(async (req, res) => {
   const { id } = req.params;
 
   const adminUser = await userModel.findById(req.user.id, pool);
-  if (adminUser && !adminUser.site_id && req.user?.site_id) adminUser.site_id = req.user.site_id;
+  if (adminUser && req.user?.site_id) adminUser.site_id = req.user.site_id;
   if (!adminUser || !adminUser.site_id) {
     return res.status(404).json({ success: false, message: 'No site assigned' });
   }

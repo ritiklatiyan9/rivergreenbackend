@@ -114,6 +114,9 @@ export const createLead = asyncHandler(async (req, res) => {
 // ============================================================
 export const getLeadStatusCounts = asyncHandler(async (req, res) => {
     const user = await userModel.findById(req.user.id, pool);
+    // Trust the header-derived site (req.user.site_id) over the DB column —
+    // see comment in site.controller.js for why this matters during a site switch.
+    if (user && req.user?.site_id) user.site_id = req.user.site_id;
     if (!user?.site_id) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
@@ -140,6 +143,7 @@ export const getLeadStatusCounts = asyncHandler(async (req, res) => {
 // ============================================================
 export const getMatterLeadsList = asyncHandler(async (req, res) => {
     const user = await userModel.findById(req.user.id, pool);
+    if (user && req.user?.site_id) user.site_id = req.user.site_id;
     if (!user?.site_id) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }

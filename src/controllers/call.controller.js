@@ -150,6 +150,10 @@ export const logCall = asyncHandler(async (req, res) => {
 // ============================================================
 export const getCalls = asyncHandler(async (req, res) => {
     const dbUser = await userModel.findById(req.user.id, pool);
+    // Trust the x-site-id header (resolved by auth middleware) over the
+    // user's DB site_id so a freshly-switched site shows correct data
+    // before /auth/active-site has finished persisting.
+    if (dbUser && req.user?.site_id) dbUser.site_id = req.user.site_id;
     if (!dbUser || !dbUser.site_id) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
@@ -255,6 +259,10 @@ export const getCallsByLead = asyncHandler(async (req, res) => {
 // ============================================================
 export const getCallAnalytics = asyncHandler(async (req, res) => {
     const dbUser = await userModel.findById(req.user.id, pool);
+    // Trust the x-site-id header (resolved by auth middleware) over the
+    // user's DB site_id so a freshly-switched site shows correct data
+    // before /auth/active-site has finished persisting.
+    if (dbUser && req.user?.site_id) dbUser.site_id = req.user.site_id;
     if (!dbUser || !dbUser.site_id) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
@@ -435,6 +443,10 @@ export const bulkLogCalls = asyncHandler(async (req, res) => {
 // ============================================================
 export const getFollowupCompliance = asyncHandler(async (req, res) => {
     const dbUser = await userModel.findById(req.user.id, pool);
+    // Trust the x-site-id header (resolved by auth middleware) over the
+    // user's DB site_id so a freshly-switched site shows correct data
+    // before /auth/active-site has finished persisting.
+    if (dbUser && req.user?.site_id) dbUser.site_id = req.user.site_id;
     if (!dbUser || !dbUser.site_id) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
@@ -449,6 +461,10 @@ export const getFollowupCompliance = asyncHandler(async (req, res) => {
 // ============================================================
 export const getLeadsForDialer = asyncHandler(async (req, res) => {
     const dbUser = await userModel.findById(req.user.id, pool);
+    // Trust the x-site-id header (resolved by auth middleware) over the
+    // user's DB site_id so a freshly-switched site shows correct data
+    // before /auth/active-site has finished persisting.
+    if (dbUser && req.user?.site_id) dbUser.site_id = req.user.site_id;
     if (!dbUser || !dbUser.site_id) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
@@ -475,6 +491,10 @@ export const getLeadsForDialer = asyncHandler(async (req, res) => {
 // ============================================================
 export const getShiftToCallQueue = asyncHandler(async (req, res) => {
     const dbUser = await userModel.findById(req.user.id, pool);
+    // Trust the x-site-id header (resolved by auth middleware) over the
+    // user's DB site_id so a freshly-switched site shows correct data
+    // before /auth/active-site has finished persisting.
+    if (dbUser && req.user?.site_id) dbUser.site_id = req.user.site_id;
     if (!dbUser || !dbUser.site_id) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
@@ -785,6 +805,10 @@ export const endCallSession = asyncHandler(async (req, res) => {
 // ============================================================
 export const getAgentCallDetails = asyncHandler(async (req, res) => {
     const dbUser = await userModel.findById(req.user.id, pool);
+    // Trust the x-site-id header (resolved by auth middleware) over the
+    // user's DB site_id so a freshly-switched site shows correct data
+    // before /auth/active-site has finished persisting.
+    if (dbUser && req.user?.site_id) dbUser.site_id = req.user.site_id;
     if (!dbUser || !dbUser.site_id) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
@@ -814,6 +838,10 @@ export const getAgentCallDetails = asyncHandler(async (req, res) => {
 // ============================================================
 export const getAdvancedAnalytics = asyncHandler(async (req, res) => {
     const dbUser = await userModel.findById(req.user.id, pool);
+    // Trust the x-site-id header (resolved by auth middleware) over the
+    // user's DB site_id so a freshly-switched site shows correct data
+    // before /auth/active-site has finished persisting.
+    if (dbUser && req.user?.site_id) dbUser.site_id = req.user.site_id;
     if (!dbUser || !dbUser.site_id) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
@@ -852,6 +880,10 @@ export const getAdvancedAnalytics = asyncHandler(async (req, res) => {
 // ============================================================
 export const getDialerHistory = asyncHandler(async (req, res) => {
     const dbUser = await userModel.findById(req.user.id, pool);
+    // Trust the x-site-id header (resolved by auth middleware) over the
+    // user's DB site_id so a freshly-switched site shows correct data
+    // before /auth/active-site has finished persisting.
+    if (dbUser && req.user?.site_id) dbUser.site_id = req.user.site_id;
     if (!dbUser || !dbUser.site_id) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
@@ -875,6 +907,10 @@ export const getDialerHistory = asyncHandler(async (req, res) => {
 // ============================================================
 export const searchDialerContacts = asyncHandler(async (req, res) => {
     const dbUser = await userModel.findById(req.user.id, pool);
+    // Trust the x-site-id header (resolved by auth middleware) over the
+    // user's DB site_id so a freshly-switched site shows correct data
+    // before /auth/active-site has finished persisting.
+    if (dbUser && req.user?.site_id) dbUser.site_id = req.user.site_id;
     if (!dbUser || !dbUser.site_id) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
