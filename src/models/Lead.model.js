@@ -186,7 +186,9 @@ class LeadModel extends MasterModel {
             SELECT COUNT(DISTINCT l.id)::int AS count
             FROM leads l
             INNER JOIN LATERAL (
-                SELECT 1 FROM calls c WHERE c.lead_id = l.id LIMIT 1
+                SELECT 1 FROM calls c
+                WHERE c.lead_id = l.id AND COALESCE(c.duration_seconds, 0) >= 1
+                LIMIT 1
             ) _c ON TRUE
             ${whereString}
         `;
@@ -225,7 +227,9 @@ class LeadModel extends MasterModel {
             SELECT COUNT(DISTINCT l.id)::int AS total
             FROM leads l
             INNER JOIN LATERAL (
-                SELECT 1 FROM calls c WHERE c.lead_id = l.id LIMIT 1
+                SELECT 1 FROM calls c
+                WHERE c.lead_id = l.id AND COALESCE(c.duration_seconds, 0) >= 1
+                LIMIT 1
             ) _c ON TRUE
             ${whereString}
         `;
@@ -242,7 +246,8 @@ class LeadModel extends MasterModel {
             INNER JOIN LATERAL (
                 SELECT COUNT(*)::int AS call_count,
                        MAX(call_start) AS last_called_at
-                FROM calls c WHERE c.lead_id = l.id
+                FROM calls c
+                WHERE c.lead_id = l.id AND COALESCE(c.duration_seconds, 0) >= 1
             ) cs ON cs.call_count > 0
             LEFT JOIN users u ON l.assigned_to = u.id
             LEFT JOIN users o ON l.owner_id = o.id

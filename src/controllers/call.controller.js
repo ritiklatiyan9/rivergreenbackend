@@ -129,8 +129,9 @@ export const logCall = asyncHandler(async (req, res) => {
         await pool.query('UPDATE leads SET status = $1, updated_at = NOW() WHERE id = $2', ['SITE_VISIT', lead_id]);
     } else if (next_action === 'CLOSE') {
         await pool.query('UPDATE leads SET status = $1, updated_at = NOW() WHERE id = $2', ['BOOKED', lead_id]);
-    } else if (call_type && call.outcome_id) {
-        // If lead is NEW and we called, mark as CONTACTED at minimum
+    } else if (call_type && call.outcome_id && (Number(call.duration_seconds) || 0) >= 1) {
+        // Only flip NEW → CONTACTED when the call was actually picked up (≥1s).
+        // Unanswered attempts must leave the lead in Fresh Leads.
         const lead = await pool.query('SELECT status FROM leads WHERE id = $1', [lead_id]);
         if (lead.rows[0]?.status === 'NEW') {
             await pool.query('UPDATE leads SET status = $1, updated_at = NOW() WHERE id = $2', ['CONTACTED', lead_id]);
@@ -411,7 +412,8 @@ export const bulkLogCalls = asyncHandler(async (req, res) => {
                 await client.query('UPDATE leads SET status = $1, updated_at = NOW() WHERE id = $2', ['SITE_VISIT', call.lead_id]);
             } else if (entry.next_action === 'CLOSE') {
                 await client.query('UPDATE leads SET status = $1, updated_at = NOW() WHERE id = $2', ['BOOKED', call.lead_id]);
-            } else if (call.outcome_id) {
+            } else if (call.outcome_id && (Number(call.duration_seconds) || 0) >= 1) {
+                // Only flip NEW → CONTACTED when the call was actually picked up (≥1s).
                 const lead = await client.query('SELECT status FROM leads WHERE id = $1', [call.lead_id]);
                 if (lead.rows[0]?.status === 'NEW') {
                     await client.query('UPDATE leads SET status = $1, updated_at = NOW() WHERE id = $2', ['CONTACTED', call.lead_id]);
@@ -703,8 +705,9 @@ export const quickLogCall = asyncHandler(async (req, res) => {
         is_manual_log: false,
     }, pool);
 
-    // Mark lead as CONTACTED if NEW
-    if (targetLeadId) {
+    // Mark lead as CONTACTED if NEW — only when the call was actually picked up (≥1s).
+    // Unanswered attempts must leave the lead in Fresh Leads.
+    if (targetLeadId && (Number(req.body.duration_seconds) || 0) >= 1) {
         const lead = await pool.query('SELECT status FROM leads WHERE id = $1', [targetLeadId]);
         if (lead.rows[0]?.status === 'NEW') {
             await pool.query('UPDATE leads SET status = $1, updated_at = NOW() WHERE id = $2', ['CONTACTED', targetLeadId]);
