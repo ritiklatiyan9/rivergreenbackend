@@ -14,10 +14,8 @@ const getScopeFilters = async (user) => {
     if (!user.site_id) return null;
 
     const filters = { siteId: user.site_id };
-    if (user.role === 'AGENT') {
+    if (user.role === 'AGENT' || user.role === 'TEAM_HEAD') {
         filters.assignedTo = user.id;
-    } else if (user.role === 'TEAM_HEAD') {
-        filters.teamId = user.team_id || null;
     }
     return filters;
 };
@@ -265,9 +263,6 @@ export const getReminders = asyncHandler(async (req, res) => {
     if (scope.assignedTo) {
         const agentIdx = params.indexOf(scope.assignedTo) + 1;
         leadScopeWhere.push(`(l.owner_id = $${agentIdx} OR l.assigned_to = $${agentIdx})`);
-    } else if (scope.teamId) {
-        const teamIdx = params.indexOf(scope.teamId) + 1;
-        leadScopeWhere.push(`(l.owner_id IN (SELECT id FROM users WHERE team_id = $${teamIdx}) OR l.assigned_to IN (SELECT id FROM users WHERE team_id = $${teamIdx}))`);
     }
 
     // Search filter
