@@ -221,12 +221,13 @@ class CallModel extends MasterModel {
     }
 
     const agentPerformanceQuery = `
-      SELECT 
-        u.id as agent_id, 
-        u.name as agent_name, 
+      SELECT
+        u.id as agent_id,
+        u.name as agent_name,
         u.role as agent_role,
         (SELECT COUNT(DISTINCT l.id) FROM leads l WHERE l.assigned_to = u.id AND l.site_id = $1) as assigned_leads,
         COUNT(c.id) as call_count,
+        COUNT(c.id) FILTER (WHERE COALESCE(c.duration_seconds, 0) >= 1) as picked_calls,
         COALESCE(ROUND(AVG(c.duration_seconds)), 0) as avg_duration
       FROM users u
       LEFT JOIN ${this.tableName} c ON ${agentJoinConditions.join(' AND ')}
