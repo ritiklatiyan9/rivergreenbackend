@@ -128,8 +128,10 @@ export const notifyAttendancePunch = async (record, opts = {}) => {
       ? record.check_in_time
       : (record.check_out_time || record.check_in_time);
 
-    const recipients = await getAdminRecipients(location?.site_id);
-    if (!recipients.length) return;
+    const adminIds = (await getAdminRecipients(location?.site_id))
+      // Avoid double-pushing if the punching user is themselves an admin/owner.
+      .filter((id) => id !== record.user_id);
+    if (!adminIds.length && !record.user_id) return;
 
     const verb = action === 'CHECK_IN' ? 'checked in' : 'checked out';
     const lateTag = (record.status === 'LATE' && action === 'CHECK_IN') ? ' · LATE' : '';
@@ -144,31 +146,42 @@ export const notifyAttendancePunch = async (record, opts = {}) => {
       ? `${siteName} · ${locName}`
       : locName;
 
-    const title = `${user.name} ${verb}${lateTag}`;
+    const adminTitle = `${user.name} ${verb}${lateTag}`;
+    const selfTitle  = `${action === 'CHECK_IN' ? 'Checked in' : 'Checked out'}${lateTag}`;
     const body = `${fmtTime12(punchTime)} · ${where}${secondaryTag}`;
 
-    // Fire-and-forget — never block the punch path on FCM latency.
-    fcmService.sendToUsers(recipients, {
-      title,
+    const payloadData = {
+      type: 'attendance',
+      action,                         // CHECK_IN | CHECK_OUT
+      channel,                        // BIOMETRIC_PUSH | BIOMETRIC_POLL | AUTO_EOD
+      user_id: record.user_id,
+      user_name: user.name,
+      user_role: user.role,
+      location_id: record.location_id,
+      location_name: locName,
+      site_id: location?.site_id || '',
+      site_name: siteName,
+      date: record.date,
+      time: punchTime,
+      status: record.status,
+      is_secondary: record.is_secondary,
+    };
+
+    // Admin push — labels with whose attendance it is, routes to admin records.
+    if (adminIds.length) {
+      fcmService.sendToUsers(adminIds, {
+        title: adminTitle,
+        body,
+        data: { ...payloadData, route: '/attendance/records' },
+      }).catch((e) => console.error('[attendance-notify] admin send failed:', e?.message || e));
+    }
+
+    // Self push — first-person title, routes to the agent's history page.
+    fcmService.sendToUsers([record.user_id], {
+      title: selfTitle,
       body,
-      data: {
-        type: 'attendance',
-        action,                         // CHECK_IN | CHECK_OUT
-        channel,                        // BIOMETRIC_PUSH | BIOMETRIC_POLL | AUTO_EOD
-        user_id: record.user_id,
-        user_name: user.name,
-        user_role: user.role,
-        location_id: record.location_id,
-        location_name: locName,
-        site_id: location?.site_id || '',
-        site_name: siteName,
-        date: record.date,
-        time: punchTime,
-        status: record.status,
-        is_secondary: record.is_secondary,
-        route: '/attendance/records',
-      },
-    }).catch((e) => console.error('[attendance-notify] send failed:', e?.message || e));
+      data: { ...payloadData, route: '/attendance/history' },
+    }).catch((e) => console.error('[attendance-notify] self send failed:', e?.message || e));
   } catch (e) {
     console.error('[attendance-notify] failed:', e?.message || e);
   }
