@@ -17,17 +17,118 @@ const getSiteId = async (userId, reqUser) => {
     return user.site_id;
 };
 
-// Helper: Build scope filters based on role
-const getScopeFilters = (user, dbUser) => {
-    const filters = { siteId: dbUser.site_id };
-    if (user.role === 'AGENT') {
-        filters.assignedTo = user.id;
-    } else if (user.role === 'TEAM_HEAD') {
-        filters.teamId = dbUser.team_id;
-    }
-    // ADMIN and OWNER see all within site
-    return filters;
+const ADMIN_ROLES = new Set(['ADMIN', 'OWNER']);
+
+const normalizeRole = (role) => String(role || '').toUpperCase();
+
+const getHeadTeamIds = async (userId, siteId, db = pool) => {
+    if (!userId || !siteId) return [];
+
+    const result = await db.query(
+        `SELECT th.team_id
+         FROM team_heads th
+         JOIN teams t ON t.id = th.team_id
+         WHERE th.user_id = $1 AND t.site_id = $2 AND t.is_active = TRUE
+         ORDER BY th.created_at ASC`,
+        [userId, siteId]
+    );
+
+    return result.rows.map((row) => String(row.team_id));
 };
+
+// Helper: Build scope filters from the DB role plus team_heads membership.
+// The APK already treats table-based heads as team heads; call analytics must
+// use the same rule or those heads only see their own agent calls.
+const getScopeFilters = async (user, dbUser) => {
+    const role = normalizeRole(dbUser?.role || user?.role);
+    const filters = { siteId: dbUser.site_id };
+    const isAdmin = ADMIN_ROLES.has(role);
+    const headTeamIds = isAdmin ? [] : await getHeadTeamIds(dbUser.id, dbUser.site_id);
+    const preferredTeamId = dbUser.team_id ? String(dbUser.team_id) : null;
+    const scopedHeadTeamId = headTeamIds.includes(preferredTeamId)
+        ? preferredTeamId
+        : (headTeamIds[0] || (role === 'TEAM_HEAD' ? preferredTeamId : null));
+    const isTeamHead = Boolean(scopedHeadTeamId);
+
+    if (isAdmin) {
+        return { ...filters, isAdmin, isTeamHead: false, headTeamIds };
+    }
+
+    if (isTeamHead) {
+        return {
+            ...filters,
+            teamId: scopedHeadTeamId,
+            isAdmin,
+            isTeamHead,
+            headTeamIds,
+        };
+    }
+
+    return {
+        ...filters,
+        assignedTo: dbUser.id,
+        isAdmin,
+        isTeamHead,
+        headTeamIds,
+    };
+};
+
+const getTeamMember = async ({ siteId, teamId, userId }, db = pool) => {
+    const result = await db.query(
+        `SELECT id, team_id
+         FROM users
+         WHERE id = $1 AND site_id = $2 AND team_id = $3
+         LIMIT 1`,
+        [userId, siteId, teamId]
+    );
+
+    return result.rows[0] || null;
+};
+
+const buildAnalyticsScope = async ({ req, dbUser, agentId, requestedTeamId }) => {
+    const scope = await getScopeFilters(req.user, dbUser);
+    const analyticsScope = {
+        siteId: scope.siteId,
+        assignedTo: scope.assignedTo,
+        teamId: scope.teamId,
+    };
+
+    if (scope.isAdmin) {
+        analyticsScope.assignedTo = agentId || null;
+        analyticsScope.teamId = requestedTeamId || null;
+        return { scope, analyticsScope };
+    }
+
+    if (scope.isTeamHead) {
+        if (requestedTeamId && String(requestedTeamId) !== String(scope.teamId)) {
+            const err = new Error('Access denied. You can view analytics only for your team.');
+            err.statusCode = 403;
+            throw err;
+        }
+
+        if (agentId) {
+            const member = await getTeamMember({
+                siteId: dbUser.site_id,
+                teamId: scope.teamId,
+                userId: agentId,
+            });
+            if (!member) {
+                const err = new Error('Access denied. This agent is not in your team.');
+                err.statusCode = 403;
+                throw err;
+            }
+            analyticsScope.assignedTo = agentId;
+        }
+
+        analyticsScope.teamId = scope.teamId;
+    }
+
+    return { scope, analyticsScope };
+};
+
+const analyticsCacheKey = ({ prefix, siteId, assignedTo, teamId, dateFrom, dateTo }) => (
+    `${prefix}:${siteId}:agent:${assignedTo || 'all'}:team:${teamId || 'all'}:${dateFrom || 'all'}:${dateTo || 'all'}`
+);
 
 const ensureShiftToCallTable = async (db) => {
     await db.query(`
@@ -159,7 +260,7 @@ export const getCalls = asyncHandler(async (req, res) => {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
 
-    const scope = getScopeFilters(req.user, dbUser);
+    const scope = await getScopeFilters(req.user, dbUser);
     const { page, limit, lead_id, outcome_id, lead_category, call_type, date_from, date_to } = req.query;
 
     const result = await callModel.findWithDetails({
@@ -268,11 +369,23 @@ export const getCallAnalytics = asyncHandler(async (req, res) => {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
 
-    const scope = getScopeFilters(req.user, dbUser);
     const { date_from, date_to, agent_id, team_id } = req.query;
+    const { analyticsScope } = await buildAnalyticsScope({
+        req,
+        dbUser,
+        agentId: agent_id || null,
+        requestedTeamId: team_id || null,
+    });
 
     // Build cache key
-    const cacheKey = `analytics:calls:${dbUser.site_id}:${agent_id || 'all'}:${team_id || 'all'}:${date_from || 'all'}:${date_to || 'all'}`;
+    const cacheKey = analyticsCacheKey({
+        prefix: 'analytics:calls',
+        siteId: dbUser.site_id,
+        assignedTo: analyticsScope.assignedTo,
+        teamId: analyticsScope.teamId,
+        dateFrom: date_from,
+        dateTo: date_to,
+    });
 
     try {
         const cached = await redisClient.get(cacheKey);
@@ -284,9 +397,7 @@ export const getCallAnalytics = asyncHandler(async (req, res) => {
     }
 
     const analytics = await callModel.getAnalytics({
-        ...scope,
-        assignedTo: agent_id || scope.assignedTo,
-        teamId: team_id || scope.teamId,
+        ...analyticsScope,
         dateFrom: date_from,
         dateTo: date_to,
     }, pool);
@@ -453,8 +564,8 @@ export const getFollowupCompliance = asyncHandler(async (req, res) => {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
 
-    const assignedTo = req.user.role === 'AGENT' ? req.user.id : null;
-    const compliance = await callModel.getFollowupCompliance(dbUser.site_id, assignedTo, pool);
+    const scope = await getScopeFilters(req.user, dbUser);
+    const compliance = await callModel.getFollowupCompliance(dbUser.site_id, scope.assignedTo, pool);
     res.json({ success: true, compliance });
 });
 
@@ -471,7 +582,7 @@ export const getLeadsForDialer = asyncHandler(async (req, res) => {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
 
-    const scope = getScopeFilters(req.user, dbUser);
+    const scope = await getScopeFilters(req.user, dbUser);
     const { page, limit, search, status, lead_category } = req.query;
 
     const result = await callModel.getLeadsForDialer({
@@ -819,9 +930,22 @@ export const getAgentCallDetails = asyncHandler(async (req, res) => {
     const { agent_id } = req.params;
     const { page, limit, date_from, date_to } = req.query;
 
-    // Agents can only see own data
-    if (req.user.role === 'AGENT' && agent_id !== req.user.id) {
-        return res.status(403).json({ success: false, message: 'Access denied' });
+    const scope = await getScopeFilters(req.user, dbUser);
+    const isOwnData = String(agent_id) === String(req.user.id);
+
+    if (!scope.isAdmin && !isOwnData) {
+        if (!scope.isTeamHead || !scope.teamId) {
+            return res.status(403).json({ success: false, message: 'Access denied' });
+        }
+
+        const member = await getTeamMember({
+            siteId: dbUser.site_id,
+            teamId: scope.teamId,
+            userId: agent_id,
+        });
+        if (!member) {
+            return res.status(403).json({ success: false, message: 'Access denied. This agent is not in your team.' });
+        }
     }
 
     const result = await callModel.getAgentCallDetails({
@@ -849,11 +973,23 @@ export const getAdvancedAnalytics = asyncHandler(async (req, res) => {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
 
-    const scope = getScopeFilters(req.user, dbUser);
     const { date_from, date_to, agent_id, team_id } = req.query;
+    const { analyticsScope } = await buildAnalyticsScope({
+        req,
+        dbUser,
+        agentId: agent_id || null,
+        requestedTeamId: team_id || null,
+    });
 
     // Build cache key
-    const cacheKey = `analytics:advanced:${dbUser.site_id}:${agent_id || 'all'}:${team_id || 'all'}:${date_from || 'all'}:${date_to || 'all'}`;
+    const cacheKey = analyticsCacheKey({
+        prefix: 'analytics:advanced',
+        siteId: dbUser.site_id,
+        assignedTo: analyticsScope.assignedTo,
+        teamId: analyticsScope.teamId,
+        dateFrom: date_from,
+        dateTo: date_to,
+    });
 
     try {
         const cached = await redisClient.get(cacheKey);
@@ -863,9 +999,7 @@ export const getAdvancedAnalytics = asyncHandler(async (req, res) => {
     } catch (err) { /* Redis down — skip */ }
 
     const analytics = await callModel.getAdvancedAnalytics({
-        ...scope,
-        assignedTo: agent_id || scope.assignedTo,
-        teamId: team_id || scope.teamId,
+        ...analyticsScope,
         dateFrom: date_from,
         dateTo: date_to,
     }, pool);
@@ -923,7 +1057,7 @@ export const searchDialerContacts = asyncHandler(async (req, res) => {
         return res.json({ success: true, results: [] });
     }
 
-    const scope = getScopeFilters(req.user, dbUser);
+    const scope = await getScopeFilters(req.user, dbUser);
     const parsedLimit = Math.min(Math.max(parseInt(limit) || 20, 5), 50);
 
     const result = await callModel.searchForDialer({

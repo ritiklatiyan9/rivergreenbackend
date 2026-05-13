@@ -146,13 +146,45 @@ class CallModel extends MasterModel {
         COUNT(*) FILTER (WHERE c.call_start >= CURRENT_DATE - INTERVAL '7 days') as week_calls,
         COUNT(*) FILTER (WHERE c.call_start >= DATE_TRUNC('month', CURRENT_DATE)) as month_calls,
         COALESCE(ROUND(AVG(c.duration_seconds)), 0) as avg_duration,
+        COUNT(*) FILTER (WHERE COALESCE(c.duration_seconds, 0) > 0) as successful_calls,
+        COUNT(*) FILTER (WHERE c.call_type = 'MISSED' OR c.call_status IN ('MISSED', 'FAILED')) as missed_calls,
+        COUNT(DISTINCT c.lead_id) FILTER (WHERE c.lead_id IS NOT NULL) as unique_leads_called,
         COUNT(*) FILTER (WHERE c.next_action = 'VISIT') as visit_requests,
-        COUNT(*) FILTER (WHERE c.next_action = 'CLOSE') as closed_calls
+        COUNT(*) FILTER (WHERE c.next_action = 'CLOSE') as closed_calls,
+        COUNT(*) FILTER (WHERE c.next_action = 'CLOSE') as conversions,
+        CASE
+          WHEN COUNT(*) > 0
+          THEN ROUND((COUNT(*) FILTER (WHERE COALESCE(c.duration_seconds, 0) > 0))::numeric / COUNT(*) * 100, 1)
+          ELSE 0
+        END as pickup_rate
       FROM ${this.tableName} c
       LEFT JOIN users u ON c.assigned_to = u.id
       WHERE ${where}
     `;
     const metricsResult = await pool.query(metricsQuery, params);
+
+    const repeatQuery = `
+      SELECT
+        COUNT(*) FILTER (WHERE call_count > 1) as repeat_contacts,
+        COUNT(*) as unique_contacts
+      FROM (
+        SELECT COALESCE(c.lead_id::text, NULLIF(c.phone_number_dialed, '')) as contact_key,
+               COUNT(*) as call_count
+        FROM ${this.tableName} c
+        LEFT JOIN users u ON c.assigned_to = u.id
+        WHERE ${where}
+          AND COALESCE(c.lead_id::text, NULLIF(c.phone_number_dialed, '')) IS NOT NULL
+        GROUP BY contact_key
+      ) grouped_contacts
+    `;
+    const repeatResult = await pool.query(repeatQuery, params);
+    const metrics = {
+      ...metricsResult.rows[0],
+      repeat_contacts: repeatResult.rows[0]?.repeat_contacts || 0,
+      repeat_rate: Number(repeatResult.rows[0]?.unique_contacts || 0) > 0
+        ? Number(((Number(repeatResult.rows[0].repeat_contacts || 0) / Number(repeatResult.rows[0].unique_contacts || 0)) * 100).toFixed(1))
+        : 0,
+    };
 
     // Outcome distribution
     const outcomeQuery = `
@@ -166,7 +198,28 @@ class CallModel extends MasterModel {
     `;
     const outcomeResult = await pool.query(outcomeQuery, params);
 
-    // Simplified Agent Performance Query that correctly uses filters
+    const agentParams = [siteId];
+    let agentIdx = 2;
+    const agentJoinConditions = ['c.assigned_to = u.id', 'c.site_id = $1'];
+    const agentWhereConditions = ["u.site_id = $1", "u.role IN ('AGENT', 'TEAM_HEAD')"];
+
+    if (dateFrom) {
+      agentJoinConditions.push(`c.call_start >= $${agentIdx++}`);
+      agentParams.push(dateFrom);
+    }
+    if (dateTo) {
+      agentJoinConditions.push(`c.call_start <= $${agentIdx++}`);
+      agentParams.push(dateTo);
+    }
+    if (teamId) {
+      agentWhereConditions.push(`u.team_id = $${agentIdx++}`);
+      agentParams.push(teamId);
+    }
+    if (assignedTo) {
+      agentWhereConditions.push(`u.id = $${agentIdx++}`);
+      agentParams.push(assignedTo);
+    }
+
     const agentPerformanceQuery = `
       SELECT 
         u.id as agent_id, 
@@ -176,17 +229,13 @@ class CallModel extends MasterModel {
         COUNT(c.id) as call_count,
         COALESCE(ROUND(AVG(c.duration_seconds)), 0) as avg_duration
       FROM users u
-      LEFT JOIN ${this.tableName} c ON c.assigned_to = u.id AND c.site_id = $1
-        ${dateFrom ? `AND c.call_start >= '${dateFrom}'` : ''}
-        ${dateTo ? `AND c.call_start <= '${dateTo}'` : ''}
-      WHERE u.site_id = $1 AND u.role IN ('AGENT', 'TEAM_HEAD')
-        ${teamId ? `AND u.team_id = $${params.indexOf(teamId) + 1}` : ''}
-        ${assignedTo ? `AND u.id = $${params.indexOf(assignedTo) + 1}` : ''}
+      LEFT JOIN ${this.tableName} c ON ${agentJoinConditions.join(' AND ')}
+      WHERE ${agentWhereConditions.join(' AND ')}
       GROUP BY u.id, u.name, u.role
       ORDER BY call_count DESC
       LIMIT 20
     `;
-    const agentResult = await pool.query(agentPerformanceQuery, params);
+    const agentResult = await pool.query(agentPerformanceQuery, agentParams);
 
 
 
@@ -214,7 +263,7 @@ class CallModel extends MasterModel {
     const conversionResult = await pool.query(conversionQuery, params);
 
     return {
-      metrics: metricsResult.rows[0],
+      metrics,
       outcomeDistribution: outcomeResult.rows,
       agentPerformance: agentResult.rows,
       dailyTrend: trendResult.rows,
