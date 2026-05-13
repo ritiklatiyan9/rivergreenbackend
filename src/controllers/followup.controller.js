@@ -265,6 +265,9 @@ export const getReminders = asyncHandler(async (req, res) => {
     if (scope.assignedTo) {
         const agentIdx = params.indexOf(scope.assignedTo) + 1;
         leadScopeWhere.push(`(l.owner_id = $${agentIdx} OR l.assigned_to = $${agentIdx})`);
+    } else if (scope.teamId) {
+        const teamIdx = params.indexOf(scope.teamId) + 1;
+        leadScopeWhere.push(`(l.owner_id IN (SELECT id FROM users WHERE team_id = $${teamIdx}) OR l.assigned_to IN (SELECT id FROM users WHERE team_id = $${teamIdx}))`);
     }
 
     // Search filter
