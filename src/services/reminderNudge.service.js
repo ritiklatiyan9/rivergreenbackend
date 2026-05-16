@@ -53,7 +53,7 @@ const collectPendingPerUser = async () => {
              COUNT(*)::int AS overdue,
              (ARRAY_AGG(st.title ORDER BY st.due_date ASC))[1:2] AS sample_titles
         FROM supervision_tasks st
-       WHERE st.status NOT IN ('COMPLETED')
+       WHERE st.status NOT IN ('COMPLETED', 'CANCELLED')
          AND st.due_date IS NOT NULL
          AND st.due_date < CURRENT_DATE
        GROUP BY st.assigned_to

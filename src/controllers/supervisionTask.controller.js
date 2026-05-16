@@ -278,12 +278,30 @@ export const updateSupervisionTask = asyncHandler(async (req, res) => {
 // ── DELETE TASK ───────────────────────────────────────────────────────────
 export const deleteSupervisionTask = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const result = await pool.query('DELETE FROM supervision_tasks WHERE id = $1 RETURNING id', [id]);
-  if (!result.rows.length) {
+
+  // Fetch before deleting so we can notify the assigned agent.
+  const existing = await pool.query(
+    'SELECT id, title, assigned_to FROM supervision_tasks WHERE id = $1',
+    [id]
+  );
+  if (!existing.rows.length) {
     return res.status(404).json({ success: false, message: 'Task not found' });
   }
+  const { title, assigned_to } = existing.rows[0];
+
+  await pool.query('DELETE FROM supervision_tasks WHERE id = $1', [id]);
+
   bustSupervisionCache();
   res.json({ success: true, message: 'Task deleted' });
+
+  // Notify the agent that their task was removed — fire-and-forget.
+  if (assigned_to) {
+    pushTaskNotification([assigned_to], {
+      title: 'Task removed',
+      body: title ? `"${title}" has been cancelled by your supervisor.` : 'A supervision task assigned to you was cancelled.',
+      data: { type: 'supervision_task_cancelled', route: '/supervision-tasks' },
+    });
+  }
 });
 
 // ── GET ANALYTICS ─────────────────────────────────────────────────────────
