@@ -12,11 +12,14 @@ const toMs = (iso) => (iso ? new Date(iso).getTime() : null);
 /**
  * @param {Array<{in:string, out:string|null}>} sessions  current array
  * @param {Date} punchTime
- * @param {{debounceMs?:number}} [opts]
+ * @param {{debounceMs?:number, punchType?:number}} [opts]
+ *   punchType — ZKTeco ATTLOG status: 0=check-in, 1=check-out, 4=OT-in, 5=OT-out.
+ *   When punchType is 1 or 5 the open session is closed directly (no alternation).
+ *   When punchType is absent or 0/4, temporal alternation is used (backward compat).
  * @returns {{sessions: Array<{in:string,out:string|null}>, changed: boolean}}
  */
 export function appendPunchToSessions(sessions, punchTime, opts = {}) {
-  const debounceMs = opts.debounceMs ?? DEFAULT_DEBOUNCE_MS;
+  const { debounceMs = DEFAULT_DEBOUNCE_MS, punchType } = opts;
   const punchMs = punchTime.getTime();
   const punchIso = punchTime.toISOString();
   const cur = Array.isArray(sessions) ? sessions : [];
@@ -31,6 +34,20 @@ export function appendPunchToSessions(sessions, punchTime, opts = {}) {
   }
 
   const next = cur.map((s) => ({ ...s }));
+
+  // Explicit check-out from the device — close the last open session directly.
+  if (punchType === 1 || punchType === 5) {
+    const openIdx = next.map((s, i) => ({ s, i })).reverse().find(({ s }) => !s.out)?.i;
+    if (openIdx != null && punchMs > toMs(next[openIdx].in)) {
+      next[openIdx].out = punchIso;
+    } else {
+      // No open session to close (e.g. double check-out scan) — record as new open session.
+      next.push({ in: punchIso, out: null });
+    }
+    return { sessions: next, changed: true };
+  }
+
+  // Untyped or explicit check-in (type 0/4): temporal alternation.
   const last = next.length > 0 ? next[next.length - 1] : null;
   if (!last || last.out) {
     next.push({ in: punchIso, out: null });

@@ -218,7 +218,7 @@ class AttendanceRecordModel extends MasterModel {
    * punches at the same instant don't lose each other.
    */
   async appendBiometricPunch(
-    { userId, locationId, dateKey, punchTime, status, isSecondary, source, raw },
+    { userId, locationId, dateKey, punchTime, punchType, status, isSecondary, source, raw },
     pool,
     opts = {},
   ) {
@@ -238,7 +238,7 @@ class AttendanceRecordModel extends MasterModel {
       const { sessions, changed } = appendPunchToSessions(
         existing.rows[0]?.sessions,
         punchTime,
-        { debounceMs },
+        { debounceMs, punchType },
       );
       if (!changed) {
         await client.query('COMMIT');

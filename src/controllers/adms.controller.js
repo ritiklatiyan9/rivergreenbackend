@@ -170,6 +170,7 @@ export const pushData = asyncHandler(async (req, res) => {
           locationId: location.id,
           dateKey: toDateKey(punch.time),
           punchTime: punch.time,
+          punchType: punch.type,
           status: isLate(punch.time, location.office_start_time) ? 'LATE' : 'PRESENT',
           isSecondary,
           source: 'BIOMETRIC',
