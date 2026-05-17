@@ -93,9 +93,11 @@ export const fetchAttendances = async (location, { timeoutMs } = {}) => {
         // logId: prefer the lib's monotonically increasing index; fall back
         // to (epoch-millis * 1000 + index) so we can still ratchet
         // `zkteco_last_log_id` even when the lib doesn't expose one.
-        logId: r.logId ?? r.recordTime
-          ? new Date(r.recordTime).getTime() * 1000 + idx
-          : Date.now() * 1000 + idx,
+        logId: r.logId != null
+          ? r.logId
+          : r.recordTime
+            ? new Date(r.recordTime).getTime() * 1000 + idx
+            : Date.now() * 1000 + idx,
         raw: r,
       }));
     } finally {

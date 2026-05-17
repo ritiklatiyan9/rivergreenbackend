@@ -74,15 +74,15 @@ export const handshake = asyncHandler(async (req, res) => {
   }
   if (location) await updateHeartbeat(location.id, {});
 
-  // ATTLOGStamp=9999  → forward-only push (don't replay history). For initial
-  //                     bulk import, change to 0 once.
-  // Realtime=1        → push each scan immediately (don't batch).
-  // TransInterval=1   → 1-minute heartbeat via getrequest.
+  // ATTLOGStamp=0  → send all records from the beginning. appendBiometricPunch
+  //                   is idempotent (debounce + FOR UPDATE), so replays are safe.
+  // Realtime=1     → push each scan immediately (don't batch).
+  // TransInterval=1 → 1-minute heartbeat via getrequest.
   const cfg = [
     `GET OPTION FROM: ${sn}`,
-    'Stamp=9999',
-    'ATTLOGStamp=9999',
-    'OPERLOGStamp=9999',
+    'Stamp=0',
+    'ATTLOGStamp=0',
+    'OPERLOGStamp=0',
     'ATTPHOTOStamp=None',
     'ErrorDelay=30',
     'Delay=10',

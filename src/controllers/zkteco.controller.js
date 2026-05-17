@@ -1,10 +1,25 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
 import { bustCache } from '../middlewares/cache.middleware.js';
-import { attendanceLocationModel } from '../models/Attendance.model.js';
+import { attendanceLocationModel, attendanceRecordModel } from '../models/Attendance.model.js';
 import userModel from '../models/User.model.js';
 import { testConnection, fetchDeviceUsers } from '../services/zkteco.service.js';
 import * as poller from '../workers/zktecoPoller.worker.js';
+
+const toDateKey = (d) => {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+};
+
+const isPunchLate = (punchTime, officeStart) => {
+  if (!officeStart) return false;
+  const [h, m] = String(officeStart).split(':').map(Number);
+  const cutoff = new Date(punchTime);
+  cutoff.setHours(h, m || 0, 0, 0);
+  return punchTime > cutoff;
+};
 
 /** GET /api/attendance/zkteco/devices — status of every configured device */
 export const listDevices = asyncHandler(async (req, res) => {
@@ -126,8 +141,51 @@ export const mapUser = asyncHandler(async (req, res) => {
     pool,
   );
   if (!updated) return res.status(404).json({ success: false, message: 'User not found' });
+
+  // Backfill: apply any punches that arrived before this mapping existed.
+  let backfilled = 0;
+  if (zkteco_user_id != null) {
+    const zkId = parseInt(zkteco_user_id, 10);
+    const { rows: unmapped } = await pool.query(
+      `SELECT up.*, al.office_start_time, al.site_id as loc_site_id
+       FROM zkteco_unmapped_punches up
+       JOIN attendance_locations al ON up.location_id = al.id
+       WHERE up.zkteco_user_id = $1 AND up.resolved = false
+       ORDER BY up.punch_time ASC`,
+      [zkId],
+    );
+    for (const punch of unmapped) {
+      const punchTime = new Date(punch.punch_time);
+      try {
+        await attendanceRecordModel.appendBiometricPunch(
+          {
+            userId: user_id,
+            locationId: punch.location_id,
+            dateKey: toDateKey(punchTime),
+            punchTime,
+            status: isPunchLate(punchTime, punch.office_start_time) ? 'LATE' : 'PRESENT',
+            isSecondary: !!(updated.primary_site_id
+              && punch.loc_site_id
+              && String(updated.primary_site_id) !== String(punch.loc_site_id)),
+            source: 'BIOMETRIC',
+            raw: punch.raw,
+          },
+          pool,
+        );
+        backfilled++;
+      } catch { /* skip individual punch failures */ }
+    }
+    if (backfilled > 0) {
+      await pool.query(
+        `UPDATE zkteco_unmapped_punches SET resolved = true
+         WHERE zkteco_user_id = $1 AND resolved = false`,
+        [zkId],
+      );
+    }
+  }
+
   bustCache('cache:*:/api/attendance*');
-  res.json({ success: true, user: updated });
+  res.json({ success: true, user: updated, backfilled });
 });
 
 /** GET /api/attendance/zkteco/mapping — table for the BiometricMapping page */
