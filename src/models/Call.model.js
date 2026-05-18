@@ -36,11 +36,11 @@ class CallModel extends MasterModel {
       params.push(callType);
     }
     if (dateFrom) {
-      conditions.push(`c.call_start >= $${idx++}`);
+      conditions.push(`c.call_start >= $${idx++}::date`);
       params.push(dateFrom);
     }
     if (dateTo) {
-      conditions.push(`c.call_start <= $${idx++}`);
+      conditions.push(`c.call_start < ($${idx++}::date + INTERVAL '1 day')`);
       params.push(dateTo);
     }
 
@@ -128,11 +128,11 @@ class CallModel extends MasterModel {
       params.push(teamId);
     }
     if (dateFrom) {
-      conditions.push(`c.call_start >= $${idx++}`);
+      conditions.push(`c.call_start >= $${idx++}::date`);
       params.push(dateFrom);
     }
     if (dateTo) {
-      conditions.push(`c.call_start <= $${idx++}`);
+      conditions.push(`c.call_start < ($${idx++}::date + INTERVAL '1 day')`);
       params.push(dateTo);
     }
 
