@@ -54,8 +54,8 @@ router.get('/agent/:agent_id/details', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN',
 // Follow-up compliance
 router.get('/compliance', cacheMiddleware(120), getFollowupCompliance);
 
-// Calls by lead (timeline)
-router.get('/lead/:leadId', cacheMiddleware(60), getCallsByLead);
+// Calls by lead (timeline) — no server cache; client always forces fresh
+router.get('/lead/:leadId', getCallsByLead);
 
 // Quick log — agent clicks call icon
 router.post('/quick-log', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN']), quickLogCall);
