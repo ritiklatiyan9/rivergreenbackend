@@ -182,6 +182,38 @@ export const getConversionFunnel = asyncHandler(async (req, res) => {
 });
 
 // ============================================================
+// GET AGENT MATTER LEADS — per-agent count of leads with ≥1 call
+// ============================================================
+export const getAgentMatterLeads = asyncHandler(async (req, res) => {
+  const siteId = await getSiteId(req.user.id, req.user);
+  if (!siteId) {
+    return res.status(404).json({ success: false, message: 'No site assigned' });
+  }
+
+  const query = `
+    SELECT
+      u.id              AS agent_id,
+      u.name            AS agent_name,
+      u.role            AS agent_role,
+      COUNT(DISTINCT l.id)::int AS matter_count
+    FROM users u
+    LEFT JOIN leads l
+      ON (l.assigned_to = u.id OR l.owner_id = u.id)
+      AND l.site_id = $1
+      AND EXISTS (SELECT 1 FROM calls c WHERE c.lead_id = l.id LIMIT 1)
+    WHERE u.site_id = $1
+      AND u.role IN ('AGENT', 'TEAM_HEAD')
+      AND u.is_active = TRUE
+    GROUP BY u.id, u.name, u.role
+    ORDER BY matter_count DESC, u.name ASC
+  `;
+
+  const result = await pool.query(query, [siteId]);
+  const total = result.rows.reduce((s, r) => s + (r.matter_count || 0), 0);
+  res.json({ success: true, agents: result.rows, total });
+});
+
+// ============================================================
 // GET TEAM PERFORMANCE
 // ============================================================
 export const getTeamPerformance = asyncHandler(async (req, res) => {
