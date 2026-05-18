@@ -186,6 +186,7 @@ export const getLeads = asyncHandler(async (req, res) => {
         search: req.query.search,
         lead_category: req.query.lead_category,
         import_job_id: req.query.import_job_id,
+        fresh_only: req.query.fresh_only === 'true',
     };
 
     // Agents & Team Heads see only leads they own or are assigned to

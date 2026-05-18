@@ -78,6 +78,10 @@ class LeadModel extends MasterModel {
             paramIndex++;
         }
 
+        if (filters.fresh_only) {
+            whereClauses.push(`NOT EXISTS (SELECT 1 FROM calls cl WHERE cl.lead_id = l.id LIMIT 1)`);
+        }
+
         const whereString = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
 
         // Get total count
@@ -187,7 +191,7 @@ class LeadModel extends MasterModel {
             FROM leads l
             INNER JOIN LATERAL (
                 SELECT 1 FROM calls c
-                WHERE c.lead_id = l.id AND COALESCE(c.duration_seconds, 0) >= 1
+                WHERE c.lead_id = l.id
                 LIMIT 1
             ) _c ON TRUE
             ${whereString}
@@ -228,7 +232,7 @@ class LeadModel extends MasterModel {
             FROM leads l
             INNER JOIN LATERAL (
                 SELECT 1 FROM calls c
-                WHERE c.lead_id = l.id AND COALESCE(c.duration_seconds, 0) >= 1
+                WHERE c.lead_id = l.id
                 LIMIT 1
             ) _c ON TRUE
             ${whereString}
@@ -247,7 +251,7 @@ class LeadModel extends MasterModel {
                 SELECT COUNT(*)::int AS call_count,
                        MAX(call_start) AS last_called_at
                 FROM calls c
-                WHERE c.lead_id = l.id AND COALESCE(c.duration_seconds, 0) >= 1
+                WHERE c.lead_id = l.id
             ) cs ON cs.call_count > 0
             LEFT JOIN users u ON l.assigned_to = u.id
             LEFT JOIN users o ON l.owner_id = o.id
