@@ -19,7 +19,7 @@ export const listUsersWithSidebarPermissions = asyncHandler(async (req, res) => 
   await ensureSidebarPermissionsTable(pool);
 
   const params = [];
-  let where = `WHERE u.role IN ('ADMIN', 'SUPERVISOR', 'LABOUR')`;
+  let where = `WHERE u.role IN ('ADMIN', 'SUPERVISOR', 'STAFF')`;
 
   // Admins are scoped to their own site; OWNER sees everyone.
   if (req.user.role === 'ADMIN' && req.user.site_id) {

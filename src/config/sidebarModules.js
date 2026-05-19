@@ -10,7 +10,7 @@ export const SIDEBAR_MODULES = [
   { key: 'leads',             label: 'Lead Management',    defaultRoles: ['ADMIN', 'OWNER'] },
   { key: 'contacts',          label: 'Contacts',           defaultRoles: ['ADMIN', 'OWNER'] },
   { key: 'inventory',         label: 'Inventory',          defaultRoles: ['ADMIN', 'OWNER', 'SUPERVISOR'] },
-  { key: 'supervision',       label: 'Supervision Tasks',  defaultRoles: ['ADMIN', 'OWNER', 'SUPERVISOR', 'LABOUR'] },
+  { key: 'supervision',       label: 'Supervision Tasks',  defaultRoles: ['ADMIN', 'OWNER', 'SUPERVISOR', 'STAFF'] },
   { key: 'lucky_draw',        label: 'Lucky Draw',         defaultRoles: ['ADMIN', 'OWNER'] },
   { key: 'users',             label: 'User Management',    defaultRoles: ['ADMIN', 'OWNER'] },
   { key: 'teams',             label: 'Teams',              defaultRoles: ['ADMIN', 'OWNER'] },
@@ -29,7 +29,7 @@ export const getDefaultModulesForRole = (role) => {
   if (role === 'OWNER' || role === 'ADMIN') {
     return SIDEBAR_MODULE_KEYS.slice();
   }
-  if (role === 'LABOUR') {
+  if (role === 'STAFF') {
     return ['supervision'];
   }
   return SIDEBAR_MODULES

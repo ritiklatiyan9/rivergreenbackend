@@ -85,7 +85,7 @@ class UserModel extends MasterModel {
           WHEN 'SUPERVISOR' THEN 2
           WHEN 'TEAM_HEAD' THEN 3
           WHEN 'AGENT' THEN 4
-          WHEN 'LABOUR' THEN 5
+          WHEN 'STAFF' THEN 5
           WHEN 'CLIENT' THEN 6
           WHEN 'VISITOR' THEN 7
         END,
@@ -217,7 +217,7 @@ class UserModel extends MasterModel {
   /** All users (with role) for the biometric mapping admin page. */
   async listForBiometricMapping(siteId, pool) {
     const params = [];
-    let where = `role IN ('ADMIN','SUPERVISOR','TEAM_HEAD','AGENT','LABOUR') AND is_active = true`;
+    let where = `role IN ('ADMIN','SUPERVISOR','TEAM_HEAD','AGENT','STAFF') AND is_active = true`;
     if (siteId) {
       where += ` AND site_id = $1`;
       params.push(siteId);
