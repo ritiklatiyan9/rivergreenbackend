@@ -33,7 +33,7 @@ export const getMySite = asyncHandler(async (req, res) => {
 
   const site = await siteModel.findById(user.site_id, pool);
   if (!site) {
-    return res.status(404).json({ success: false, message: 'Site not found' });
+    return res.status(404).json({ success: false, message: 'Site is  not found' });
   }
 
   res.json({ success: true, site });
