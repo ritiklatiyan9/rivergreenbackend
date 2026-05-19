@@ -16,7 +16,7 @@ const router = express.Router();
 
 router.use(authMiddleware);
 
-const ASSIGNEE_ROLES = ['ADMIN', 'OWNER', 'SUPERVISOR', 'AGENT', 'TEAM_HEAD'];
+const ASSIGNEE_ROLES = ['ADMIN', 'OWNER', 'SUPERVISOR', 'AGENT', 'TEAM_HEAD', 'STAFF'];
 
 // Admin/Owner only — create, delete, fetch assignment list
 router.post('/', checkRole(['ADMIN', 'OWNER']), createSupervisionTask);
