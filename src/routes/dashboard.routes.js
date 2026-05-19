@@ -21,9 +21,9 @@ router.get('/stats', cacheMiddleware(60), getDashboardStats);
 router.get('/funnel', cacheMiddleware(60), getConversionFunnel);
 
 // Per-agent matter leads counts
-router.get('/agent-matter-leads', cacheMiddleware(60), checkRole(['ADMIN', 'OWNER']), getAgentMatterLeads);
+router.get('/agent-matter-leads', cacheMiddleware(60), checkRole(['ADMIN', 'OWNER', 'SUPERVISOR']), getAgentMatterLeads);
 
 // Team performance breakdown
-router.get('/teams-performance', cacheMiddleware(60), checkRole(['ADMIN', 'OWNER']), getTeamPerformance);
+router.get('/teams-performance', cacheMiddleware(60), checkRole(['ADMIN', 'OWNER', 'SUPERVISOR']), getTeamPerformance);
 
 export default router;

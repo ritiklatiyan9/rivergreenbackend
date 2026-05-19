@@ -34,18 +34,18 @@ router.get('/track/:id/receipt-token', getPublicBookingReceiptToken);
 router.use(authMiddleware);
 
 // Agent booking via shared link (AGENT, TEAM_HEAD, ADMIN)
-router.post('/agent-book/:plotId', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN']), agentBookPlot);
+router.post('/agent-book/:plotId', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'SUPERVISOR']), agentBookPlot);
 
 // Admin approval workflow
-router.get('/pending-approvals', checkRole(['ADMIN', 'OWNER']), cacheMiddleware(60), getPendingApprovals);
+router.get('/pending-approvals', checkRole(['ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(60), getPendingApprovals);
 router.put('/:id/approve', checkRole(['ADMIN', 'OWNER']), approveBooking);
 router.put('/:id/reject', checkRole(['ADMIN', 'OWNER']), rejectBooking);
 
 // Stats
-router.get('/stats', checkRole(['AGENT', 'ADMIN', 'OWNER', 'TEAM_HEAD']), cacheMiddleware(120), getBookingStats);
+router.get('/stats', checkRole(['AGENT', 'ADMIN', 'OWNER', 'TEAM_HEAD', 'SUPERVISOR']), cacheMiddleware(120), getBookingStats);
 
 // CRUD
-router.post('/', checkRole(['ADMIN', 'OWNER', 'TEAM_HEAD', 'AGENT']), createBooking);
+router.post('/', checkRole(['ADMIN', 'OWNER', 'TEAM_HEAD', 'AGENT', 'SUPERVISOR']), createBooking);
 router.get('/', cacheMiddleware(120), getBookings);
 router.get('/:id', cacheMiddleware(120), getBooking);
 router.get('/:id/receipt-token', getBookingReceiptToken);

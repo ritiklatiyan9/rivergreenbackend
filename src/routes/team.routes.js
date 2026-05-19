@@ -27,7 +27,7 @@ import { cacheMiddleware } from '../middlewares/cache.middleware.js';
 router.use(authMiddleware);
 
 // Static paths MUST come before :id params
-router.get('/all/performance', authMiddleware, checkRole(['ADMIN']), cacheMiddleware(120), getAllTeamsPerformance);
+router.get('/all/performance', authMiddleware, checkRole(['ADMIN', 'SUPERVISOR']), cacheMiddleware(120), getAllTeamsPerformance);
 
 // Current user's own team (agent & team_head friendly)
 router.get('/my', authMiddleware, cacheMiddleware(120), getMyTeam);

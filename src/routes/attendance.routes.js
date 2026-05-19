@@ -53,17 +53,17 @@ router.get('/locations', checkRole(['ADMIN', 'OWNER']), cacheMiddleware(300), ge
 router.post('/locations', checkRole(['ADMIN', 'OWNER']), createLocation);
 router.put('/locations/:id', checkRole(['ADMIN', 'OWNER']), updateLocation);
 router.delete('/locations/:id', checkRole(['ADMIN', 'OWNER']), deleteLocation);
-router.get('/records', checkRole(['ADMIN', 'OWNER']), cacheMiddleware(60), getAllRecords);
-router.get('/stats', checkRole(['ADMIN', 'OWNER']), cacheMiddleware(60), getDailyStats);
-router.get('/users', checkRole(['ADMIN', 'OWNER']), cacheMiddleware(300), getAttendanceUsers);
-router.get('/user/:userId', checkRole(['ADMIN', 'OWNER']), cacheMiddleware(120), getUserAttendance);
-router.get('/user-movement/:userId', checkRole(['ADMIN', 'OWNER']), cacheMiddleware(30), getUserMovement);
-router.get('/live-locations', checkRole(['ADMIN', 'OWNER']), getLiveLocations);
+router.get('/records', checkRole(['ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(60), getAllRecords);
+router.get('/stats', checkRole(['ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(60), getDailyStats);
+router.get('/users', checkRole(['ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(300), getAttendanceUsers);
+router.get('/user/:userId', checkRole(['ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(120), getUserAttendance);
+router.get('/user-movement/:userId', checkRole(['ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(30), getUserMovement);
+router.get('/live-locations', checkRole(['ADMIN', 'OWNER', 'SUPERVISOR']), getLiveLocations);
 
 // ── Analytics ──
-router.get('/analytics/user',  checkRole(['ADMIN', 'OWNER']), cacheMiddleware(60), getUserAnalytics);
-router.get('/analytics/team',  checkRole(['ADMIN', 'OWNER']), cacheMiddleware(60), getTeamAnalytics);
-router.get('/analytics/teams', checkRole(['ADMIN', 'OWNER']), cacheMiddleware(300), listTeamsForAnalytics);
+router.get('/analytics/user',  checkRole(['ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(60), getUserAnalytics);
+router.get('/analytics/team',  checkRole(['ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(60), getTeamAnalytics);
+router.get('/analytics/teams', checkRole(['ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(300), listTeamsForAnalytics);
 
 // ── ZKTeco biometric admin routes ──
 router.get('/zkteco/devices', checkRole(['ADMIN', 'OWNER']), listDevices);
@@ -73,6 +73,6 @@ router.get('/zkteco/device-users/:locationId', checkRole(['ADMIN', 'OWNER']), ge
 router.get('/zkteco/unmapped', checkRole(['ADMIN', 'OWNER']), listUnmapped);
 router.post('/zkteco/unmapped/:id/resolve', checkRole(['ADMIN', 'OWNER']), resolveUnmapped);
 router.post('/zkteco/map-user', checkRole(['ADMIN', 'OWNER']), mapUser);
-router.get('/zkteco/mapping', checkRole(['ADMIN', 'OWNER']), listMapping);
+router.get('/zkteco/mapping', checkRole(['ADMIN', 'OWNER', 'SUPERVISOR']), listMapping);
 
 export default router;

@@ -47,13 +47,13 @@ import { cacheMiddleware } from '../middlewares/cache.middleware.js';
 
 router.use(authMiddleware);
 
-router.post('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), createContact);
-router.get('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getContacts);
-router.put('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), updateContact);
-router.delete('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), deleteContact);
-router.post('/:id/convert', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), convertContactToLead);
-router.post('/shift-to-call', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), shiftContactsToCall);
-router.post('/bulk/upload', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), excelUpload.single('file'), bulkUploadContacts);
-router.get('/bulk/status/:jobId', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(15), getContactJobStatus);
+router.post('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), createContact);
+router.get('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(120), getContacts);
+router.put('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), updateContact);
+router.delete('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), deleteContact);
+router.post('/:id/convert', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), convertContactToLead);
+router.post('/shift-to-call', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), shiftContactsToCall);
+router.post('/bulk/upload', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), excelUpload.single('file'), bulkUploadContacts);
+router.get('/bulk/status/:jobId', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(15), getContactJobStatus);
 
 export default router;

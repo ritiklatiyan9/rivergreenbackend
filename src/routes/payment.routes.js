@@ -22,16 +22,16 @@ router.get('/verify-receipt', verifyReceiptToken);
 router.use(authMiddleware);
 
 // Stats
-router.get('/stats', checkRole(['AGENT', 'ADMIN', 'OWNER', 'TEAM_HEAD']), cacheMiddleware(120), getPaymentStats);
+router.get('/stats', checkRole(['AGENT', 'ADMIN', 'OWNER', 'TEAM_HEAD', 'SUPERVISOR']), cacheMiddleware(120), getPaymentStats);
 
 // Overdue
-router.get('/overdue', checkRole(['ADMIN', 'OWNER', 'TEAM_HEAD']), cacheMiddleware(120), getOverduePayments);
+router.get('/overdue', checkRole(['ADMIN', 'OWNER', 'TEAM_HEAD', 'SUPERVISOR']), cacheMiddleware(120), getOverduePayments);
 
 // By booking
 router.get('/booking/:bookingId', cacheMiddleware(120), getPaymentsByBooking);
 
 // CRUD
-router.post('/', checkRole(['ADMIN', 'OWNER', 'TEAM_HEAD']), recordPayment);
+router.post('/', checkRole(['ADMIN', 'OWNER', 'TEAM_HEAD', 'SUPERVISOR']), recordPayment);
 router.get('/', cacheMiddleware(120), getPayments);
 router.put('/:id', checkRole(['ADMIN', 'OWNER']), updatePayment);
 router.delete('/:id', checkRole(['ADMIN', 'OWNER']), deletePayment);

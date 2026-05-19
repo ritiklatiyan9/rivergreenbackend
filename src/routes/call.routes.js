@@ -34,22 +34,22 @@ router.get('/outcomes', cacheMiddleware(600), getCallOutcomes);
 
 // Leads Dialer — live list of leads; short TTL
 router.get('/leads-dialer', cacheMiddleware(60), getLeadsForDialer);
-router.get('/shift-to-call', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(15), getShiftToCallQueue);
+router.get('/shift-to-call', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(15), getShiftToCallQueue);
 
 // Dialer History — cursor-paginated call log
-router.get('/dialer-history', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN']), cacheMiddleware(15), getDialerHistory);
+router.get('/dialer-history', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'SUPERVISOR']), cacheMiddleware(15), getDialerHistory);
 
 // Dialer Search — search leads/contacts by name or phone
-router.get('/dialer-search', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN']), searchDialerContacts);
+router.get('/dialer-search', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'SUPERVISOR']), searchDialerContacts);
 
 // Analytics
-router.get('/analytics', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getCallAnalytics);
+router.get('/analytics', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(120), getCallAnalytics);
 
 // Advanced Analytics (Admin/Owner only)
-router.get('/advanced-analytics', checkRole(['ADMIN', 'OWNER']), cacheMiddleware(120), getAdvancedAnalytics);
+router.get('/advanced-analytics', checkRole(['ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(120), getAdvancedAnalytics);
 
 // Agent call details
-router.get('/agent/:agent_id/details', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getAgentCallDetails);
+router.get('/agent/:agent_id/details', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(120), getAgentCallDetails);
 
 // Follow-up compliance
 router.get('/compliance', cacheMiddleware(120), getFollowupCompliance);
@@ -58,22 +58,22 @@ router.get('/compliance', cacheMiddleware(120), getFollowupCompliance);
 router.get('/lead/:leadId', getCallsByLead);
 
 // Quick log — agent clicks call icon
-router.post('/quick-log', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN']), quickLogCall);
+router.post('/quick-log', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'SUPERVISOR']), quickLogCall);
 
 // Sync device call log — bulk import from phone's native call log
-router.post('/sync-device-log', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN']), syncDeviceCallLog);
+router.post('/sync-device-log', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'SUPERVISOR']), syncDeviceCallLog);
 
 // End call session
-router.put('/:id/end', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN']), endCallSession);
+router.put('/:id/end', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'SUPERVISOR']), endCallSession);
 
 // Bulk create (Daily Entry)
-router.post('/bulk', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN']), bulkLogCalls);
+router.post('/bulk', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'SUPERVISOR']), bulkLogCalls);
 
 // Call CRUD
-router.post('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN']), logCall);
+router.post('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'SUPERVISOR']), logCall);
 router.get('/', cacheMiddleware(60), getCalls);
 router.get('/:id', cacheMiddleware(120), getCall);
-router.put('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN']), updateCall);
+router.put('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'SUPERVISOR']), updateCall);
 router.delete('/:id', checkRole(['ADMIN', 'OWNER']), deleteCall);
 
 export default router;

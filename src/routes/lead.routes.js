@@ -63,48 +63,48 @@ import { cacheMiddleware } from '../middlewares/cache.middleware.js';
 router.use(authMiddleware);
 
 // CRUD
-router.post('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), upload.single('photo'), createLead);
-router.get('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getLeads);
+router.post('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), upload.single('photo'), createLead);
+router.get('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(120), getLeads);
 
 // Static routes BEFORE :id
-router.get('/counts', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(60), getLeadStatusCounts);
-router.get('/matter', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(60), getMatterLeadsList);
-router.get('/assignable-users', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(300), getAssignableUsers);
-router.get('/assignment-history', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getAllAssignmentHistory);
-router.post('/bulk-assign', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), bulkAssignLeads);
-router.post('/shift-to-call', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), shiftLeadsToCall);
+router.get('/counts', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(60), getLeadStatusCounts);
+router.get('/matter', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(60), getMatterLeadsList);
+router.get('/assignable-users', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(300), getAssignableUsers);
+router.get('/assignment-history', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(120), getAllAssignmentHistory);
+router.post('/bulk-assign', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), bulkAssignLeads);
+router.post('/shift-to-call', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), shiftLeadsToCall);
 
 // Import batches — list + rename (used by Fresh Leads stage dropdown)
 router.get(
     '/import-batches',
-    checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']),
+    checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']),
     cacheMiddleware(30),
     listImportBatches
 );
 router.patch(
     '/import-batches/:id',
-    checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']),
+    checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']),
     renameImportBatch
 );
 
 // Single lead routes
-router.get('/:id/full', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getLeadFullDetails);
-router.get('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getLead);
-router.put('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), upload.single('photo'), updateLead);
-router.delete('/:id', checkRole(['TEAM_HEAD', 'ADMIN', 'OWNER']), deleteLead);
-router.post('/:id/assign', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), assignLead);
-router.get('/:id/assignment-history', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), cacheMiddleware(120), getLeadAssignmentHistory);
+router.get('/:id/full', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(120), getLeadFullDetails);
+router.get('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(120), getLead);
+router.put('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), upload.single('photo'), updateLead);
+router.delete('/:id', checkRole(['TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), deleteLead);
+router.post('/:id/assign', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), assignLead);
+router.get('/:id/assignment-history', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(120), getLeadAssignmentHistory);
 
 // Bulk import
 router.post(
     '/bulk/upload',
-    checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']),
+    checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']),
     excelUpload.single('file'),
     bulkUploadLeads
 );
 router.get(
     '/bulk/status/:jobId',
-    checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']),
+    checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']),
     cacheMiddleware(15),
     getBulkJobStatus
 );

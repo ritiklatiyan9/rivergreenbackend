@@ -23,10 +23,10 @@ router.get('/stats', getActivityStats);
 router.get('/today', getTodayActivities);
 
 // CRUD
-router.post('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), createActivity);
+router.post('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), createActivity);
 router.get('/', getActivities);
 router.get('/:id', getActivity);
-router.put('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER']), updateActivity);
+router.put('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), updateActivity);
 router.delete('/:id', checkRole(['ADMIN', 'OWNER']), deleteActivity);
 
 export default router;

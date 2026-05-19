@@ -30,12 +30,12 @@ router.get('/scheduled', cacheMiddleware(60), getScheduledFollowups);
 router.get('/missed', cacheMiddleware(60), getMissedFollowups);
 
 // CRUD
-router.post('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN']), createFollowup);
+router.post('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'SUPERVISOR']), createFollowup);
 router.get('/', cacheMiddleware(60), getFollowups);
-router.put('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN']), updateFollowup);
+router.put('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'SUPERVISOR']), updateFollowup);
 
 // Snooze & Escalate
-router.put('/:id/snooze', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN']), snoozeFollowup);
-router.put('/:id/escalate', checkRole(['TEAM_HEAD', 'ADMIN']), escalateFollowup);
+router.put('/:id/snooze', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'SUPERVISOR']), snoozeFollowup);
+router.put('/:id/escalate', checkRole(['TEAM_HEAD', 'ADMIN', 'SUPERVISOR']), escalateFollowup);
 
 export default router;
