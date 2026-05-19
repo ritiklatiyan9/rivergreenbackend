@@ -224,6 +224,14 @@ class LeadModel extends MasterModel {
             params.push(`%${filters.search}%`);
             paramIndex++;
         }
+        if (filters.status) {
+            whereClauses.push(`l.status = $${paramIndex++}`);
+            params.push(filters.status);
+        }
+        if (filters.lead_category) {
+            whereClauses.push(`l.lead_category = $${paramIndex++}`);
+            params.push(filters.lead_category);
+        }
 
         const whereString = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
 

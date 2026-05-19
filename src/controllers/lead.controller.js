@@ -150,7 +150,12 @@ export const getMatterLeadsList = asyncHandler(async (req, res) => {
 
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 20;
-    const filters = { site_id: user.site_id, search: req.query.search };
+    const filters = {
+        site_id: user.site_id,
+        search: req.query.search,
+        status: req.query.status,
+        lead_category: req.query.lead_category,
+    };
 
     if (user.role === 'AGENT' || user.role === 'TEAM_HEAD') {
         filters.owner_or_assigned = user.id;
