@@ -40,6 +40,8 @@ export const hasStoredModules = async (userId, pool) => {
 // if the user has no explicit rows yet.
 export const getEffectiveModulesForUser = async (user, pool) => {
   if (!user) return [];
+  // STAFF is hard-locked — stored admin overrides are intentionally ignored.
+  if (user.role === 'STAFF') return ['supervision'];
   const stored = await getStoredModulesForUser(user.id, pool);
   if (stored.length > 0) return stored.filter(isValidModuleKey);
   return getDefaultModulesForRole(user.role);
