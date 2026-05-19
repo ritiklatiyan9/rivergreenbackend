@@ -12,7 +12,7 @@ const sanitizeUser = (user) => {
   return safe;
 };
 
-const VALID_ROLES = ['TEAM_HEAD', 'AGENT'];
+const VALID_ROLES = ['TEAM_HEAD', 'AGENT', 'LABOUR'];
 
 // ============================================================
 // USER MANAGEMENT (Admin manages users within their site)

@@ -42,9 +42,10 @@ const sanitizeAttachments = (list, userId) => {
   return list.map((a) => normalizeAttachment(a, userId)).filter(Boolean);
 };
 
-// Roles that can be assigned a supervision task (i.e. anyone non-admin who
-// reports to admin/owner — supervisors, agents, team heads).
-const ASSIGNABLE_ROLES = ['SUPERVISOR', 'AGENT', 'TEAM_HEAD'];
+// Roles that can be assigned a supervision task.
+const ASSIGNABLE_ROLES = ['SUPERVISOR', 'AGENT', 'TEAM_HEAD', 'LABOUR'];
+// Default roles shown in the assign-to dropdown (supervisor + labour).
+const DEFAULT_DROPDOWN_ROLES = ['SUPERVISOR', 'LABOUR'];
 const isAssignee = (role) => ASSIGNABLE_ROLES.includes(String(role || '').toUpperCase());
 const isPrivileged = (role) => ['ADMIN', 'OWNER'].includes(String(role || '').toUpperCase());
 
@@ -58,7 +59,7 @@ export const createSupervisionTask = asyncHandler(async (req, res) => {
   // Verify assigned_to is an eligible assignee (supervisor, agent, team head)
   const supCheck = await pool.query('SELECT id, role FROM users WHERE id = $1', [assigned_to]);
   if (!supCheck.rows.length || !isAssignee(supCheck.rows[0].role)) {
-    return res.status(400).json({ success: false, message: 'Assigned user must be a supervisor, agent, or team head' });
+    return res.status(400).json({ success: false, message: 'Assigned user must be a supervisor, labour, agent, or team head' });
   }
 
   const cleanedAdminAttachments = sanitizeAttachments(admin_attachments, req.user.id);
@@ -409,7 +410,7 @@ export const getSupervisorsForAssignment = asyncHandler(async (req, res) => {
     .split(',')
     .map((r) => r.trim().toUpperCase())
     .filter((r) => ASSIGNABLE_ROLES.includes(r));
-  const roles = requested.length ? requested : ASSIGNABLE_ROLES;
+  const roles = requested.length ? requested : DEFAULT_DROPDOWN_ROLES;
 
   const result = await pool.query(
     `SELECT id, name, email, role
