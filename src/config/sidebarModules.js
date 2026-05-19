@@ -10,7 +10,7 @@ export const SIDEBAR_MODULES = [
   { key: 'leads',             label: 'Lead Management',    defaultRoles: ['ADMIN', 'OWNER'] },
   { key: 'contacts',          label: 'Contacts',           defaultRoles: ['ADMIN', 'OWNER'] },
   { key: 'inventory',         label: 'Inventory',          defaultRoles: ['ADMIN', 'OWNER', 'SUPERVISOR'] },
-  { key: 'supervision',       label: 'Supervision Tasks',  defaultRoles: ['ADMIN', 'OWNER', 'SUPERVISOR'] },
+  { key: 'supervision',       label: 'Supervision Tasks',  defaultRoles: ['ADMIN', 'OWNER', 'SUPERVISOR', 'LABOUR'] },
   { key: 'lucky_draw',        label: 'Lucky Draw',         defaultRoles: ['ADMIN', 'OWNER'] },
   { key: 'users',             label: 'User Management',    defaultRoles: ['ADMIN', 'OWNER'] },
   { key: 'teams',             label: 'Teams',              defaultRoles: ['ADMIN', 'OWNER'] },
@@ -27,8 +27,10 @@ export const SIDEBAR_MODULE_KEYS = SIDEBAR_MODULES.map((m) => m.key);
 
 export const getDefaultModulesForRole = (role) => {
   if (role === 'OWNER' || role === 'ADMIN') {
-    // Owner/Admin always see everything by default
     return SIDEBAR_MODULE_KEYS.slice();
+  }
+  if (role === 'LABOUR') {
+    return ['supervision'];
   }
   return SIDEBAR_MODULES
     .filter((m) => m.defaultRoles.includes(role))
