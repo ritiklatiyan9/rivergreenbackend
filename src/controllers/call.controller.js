@@ -17,7 +17,7 @@ const getSiteId = async (userId, reqUser) => {
     return user.site_id;
 };
 
-const ADMIN_ROLES = new Set(['ADMIN', 'OWNER']);
+const ADMIN_ROLES = new Set(['ADMIN', 'OWNER', 'SUPERVISOR']);
 
 const normalizeRole = (role) => String(role || '').toUpperCase();
 

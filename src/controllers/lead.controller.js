@@ -368,7 +368,7 @@ export const assignLead = asyncHandler(async (req, res) => {
         return res.status(404).json({ success: false, message: 'Lead not found' });
     }
 
-    const isAdminOrOwner = req.user.role === 'ADMIN' || req.user.role === 'OWNER';
+    const isAdminOrOwner = req.user.role === 'ADMIN' || req.user.role === 'OWNER' || req.user.role === 'SUPERVISOR';
     if (!isAdminOrOwner && lead.owner_id !== req.user.id && lead.assigned_to !== req.user.id) {
         return res.status(403).json({ success: false, message: 'Not authorized to assign this lead' });
     }
@@ -411,7 +411,7 @@ export const bulkAssignLeads = asyncHandler(async (req, res) => {
         return res.status(404).json({ success: false, message: 'Target user not found' });
     }
 
-    const isAdminOrOwner = req.user.role === 'ADMIN' || req.user.role === 'OWNER';
+    const isAdminOrOwner = req.user.role === 'ADMIN' || req.user.role === 'OWNER' || req.user.role === 'SUPERVISOR';
     let assignedCount = 0;
 
     for (const leadId of lead_ids) {
