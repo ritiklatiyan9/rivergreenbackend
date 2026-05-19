@@ -28,7 +28,7 @@ export const getMySite = asyncHandler(async (req, res) => {
   // serve data for the old site.
   if (user && req.user?.site_id) user.site_id = req.user.site_id;
   if (!user || !user.site_id) {
-    return res.status(404).json({ success: false, message: 'No site assigned' });
+    return res.status(404).json({ success: false, message: 'No site is assigned' });
   }
 
   const site = await siteModel.findById(user.site_id, pool);
