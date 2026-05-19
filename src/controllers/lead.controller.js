@@ -9,7 +9,7 @@ import fs from 'fs';
 import { leadImportQueue } from '../utils/jobQueue.js';
 import { uploadSingle } from '../utils/upload.js';
 
-const VALID_STATUSES = ['NEW', 'CONTACTED', 'INTERESTED', 'SITE_VISIT', 'NEGOTIATION', 'BOOKED', 'LOST', 'INCOMING_OFF', 'SWITCH_OFF', 'NOT_ANSWERING'];
+const VALID_STATUSES = ['NEW', 'CONTACTED', 'INTERESTED', 'NOT_INTERESTED', 'SITE_VISIT', 'NEGOTIATION', 'BOOKED', 'LOST', 'INCOMING_OFF', 'SWITCH_OFF', 'NOT_ANSWERING'];
 
 const getSiteId = async (userId, reqUser) => {
     if (reqUser && reqUser.site_id) return reqUser.site_id;
@@ -132,7 +132,7 @@ export const getLeadStatusCounts = asyncHandler(async (req, res) => {
         leadModel.getMatterLeadsCount(filters, pool),
     ]);
     // Ensure all statuses are present with defaults
-    const allStatuses = ['NEW', 'CONTACTED', 'INTERESTED', 'SITE_VISIT', 'NEGOTIATION', 'BOOKED', 'LOST', 'INCOMING_OFF', 'SWITCH_OFF', 'NOT_ANSWERING'];
+    const allStatuses = ['NEW', 'CONTACTED', 'INTERESTED', 'NOT_INTERESTED', 'SITE_VISIT', 'NEGOTIATION', 'BOOKED', 'LOST', 'INCOMING_OFF', 'SWITCH_OFF', 'NOT_ANSWERING'];
     const counts = Object.fromEntries(allStatuses.map(s => [s, rawCounts[s] ?? 0]));
     const total = Object.values(counts).reduce((a, b) => a + b, 0);
     return res.json({ success: true, counts, total, matterCount });
