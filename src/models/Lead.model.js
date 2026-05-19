@@ -240,7 +240,7 @@ class LeadModel extends MasterModel {
             FROM leads l
             INNER JOIN LATERAL (
                 SELECT 1 FROM calls c
-                WHERE c.lead_id = l.id
+                WHERE c.lead_id = l.id AND c.duration_seconds > 0
                 LIMIT 1
             ) _c ON TRUE
             ${whereString}
@@ -259,7 +259,7 @@ class LeadModel extends MasterModel {
                 SELECT COUNT(*)::int AS call_count,
                        MAX(call_start) AS last_called_at
                 FROM calls c
-                WHERE c.lead_id = l.id
+                WHERE c.lead_id = l.id AND c.duration_seconds > 0
             ) cs ON cs.call_count > 0
             LEFT JOIN users u ON l.assigned_to = u.id
             LEFT JOIN users o ON l.owner_id = o.id
