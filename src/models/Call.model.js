@@ -79,30 +79,15 @@ class CallModel extends MasterModel {
   }
 
   // Get calls for a specific lead (timeline view).
-  // Includes directly-linked calls (lead_id = leadId) AND phone-matched calls
-  // that were synced from the device log without a lead_id set.
   async findByLead(leadId, pool) {
     const query = `
-      WITH lead_info AS (
-        SELECT regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') AS phone_digits
-        FROM leads
-        WHERE id = $1
-      )
-      SELECT DISTINCT c.*,
-        u_agent.name  AS agent_name,
-        co.label      AS outcome_label
+      SELECT c.*,
+        u_agent.name AS agent_name,
+        co.label     AS outcome_label
       FROM ${this.tableName} c
-      CROSS JOIN lead_info li
-      LEFT JOIN users       u_agent ON c.assigned_to = u_agent.id
-      LEFT JOIN call_outcomes co    ON c.outcome_id  = co.id
-      WHERE
-        c.lead_id = $1
-        OR (
-          c.lead_id IS NULL
-          AND length(li.phone_digits) >= 7
-          AND right(regexp_replace(COALESCE(c.phone_number_dialed, ''), '[^0-9]', '', 'g'), 10)
-              = right(li.phone_digits, 10)
-        )
+      LEFT JOIN users        u_agent ON c.assigned_to = u_agent.id
+      LEFT JOIN call_outcomes co     ON c.outcome_id  = co.id
+      WHERE c.lead_id = $1
       ORDER BY c.call_start DESC
     `;
     const result = await pool.query(query, [leadId]);
