@@ -501,7 +501,7 @@ export const getTeamMembersPerformance = asyncHandler(async (req, res) => {
         COUNT(*) FILTER (WHERE c.call_start::date = CURRENT_DATE) as calls_today,
         COUNT(*) FILTER (WHERE c.call_start >= date_trunc('week', CURRENT_DATE)) as calls_this_week,
         AVG(c.duration_seconds) as avg_duration,
-        COUNT(*) FILTER (WHERE c.outcome_id IS NOT NULL) as successful_calls
+        COUNT(*) FILTER (WHERE COALESCE(c.duration_seconds, 0) > 0) as successful_calls
       FROM calls c WHERE c.assigned_to = u.id
     ) call_stats ON true
     LEFT JOIN LATERAL (
