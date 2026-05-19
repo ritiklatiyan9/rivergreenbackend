@@ -138,18 +138,20 @@ export const pushData = asyncHandler(async (req, res) => {
   // and appendBiometricPunch knows how to fold it into the sessions array
   // for that day (open new session vs close current). Pull-mode poller
   // continues to use the old reducer path.
+  const tzOffsetMin = parseInt(process.env.ZKTECO_TZ_OFFSET_MINUTES || '330', 10);
   const toDateKey = (d) => {
-    const yyyy = d.getFullYear();
-    const mm = String(d.getMonth() + 1).padStart(2, '0');
-    const dd = String(d.getDate()).padStart(2, '0');
+    const local = new Date(d.getTime() + tzOffsetMin * 60_000);
+    const yyyy = local.getUTCFullYear();
+    const mm = String(local.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(local.getUTCDate()).padStart(2, '0');
     return `${yyyy}-${mm}-${dd}`;
   };
   const isLate = (d, officeStart) => {
     if (!officeStart) return false;
     const [h, m] = String(officeStart).split(':').map(Number);
-    const cutoff = new Date(d);
-    cutoff.setHours(h, m || 0, 0, 0);
-    return d > cutoff;
+    const local = new Date(d.getTime() + tzOffsetMin * 60_000);
+    const punchMinutes = local.getUTCHours() * 60 + local.getUTCMinutes();
+    return punchMinutes > h * 60 + (m || 0);
   };
 
   let applied = 0;

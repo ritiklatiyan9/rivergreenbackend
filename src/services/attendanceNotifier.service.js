@@ -13,6 +13,10 @@
 import pool from '../config/db.js';
 import fcmService from './fcm.service.js';
 
+// Configured timezone offset in minutes (default IST = +05:30 = 330 min).
+// Must match ZKTECO_TZ_OFFSET_MINUTES used by admsClockSync and the reducers.
+const TZ_OFFSET_MIN = parseInt(process.env.ZKTECO_TZ_OFFSET_MINUTES || '330', 10);
+
 // In-memory caches (5-minute TTL) so a busy device pushing 50 punches/minute
 // doesn't fan out into 50 user/location SELECTs.
 const _userCache = new Map();      // user_id    -> { id, name, role, email }
@@ -30,8 +34,12 @@ const fmtTime12 = (iso) => {
   if (!iso) return '';
   const d = new Date(iso);
   if (isNaN(d.getTime())) return '';
-  let h = d.getHours();
-  const m = String(d.getMinutes()).padStart(2, '0');
+  // Pre-shift to the configured device timezone before extracting h/m.
+  // Using getUTCHours() on the shifted date avoids any dependence on the
+  // server's TZ environment variable (same pattern as admsClockSync.js).
+  const local = new Date(d.getTime() + TZ_OFFSET_MIN * 60_000);
+  let h = local.getUTCHours();
+  const m = String(local.getUTCMinutes()).padStart(2, '0');
   const ampm = h >= 12 ? 'PM' : 'AM';
   h = h % 12 || 12;
   return `${h}:${m} ${ampm}`;

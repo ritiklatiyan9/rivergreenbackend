@@ -9,20 +9,27 @@
 
 const DEFAULT_DEBOUNCE_MS = 10_000;
 
+// Configured timezone offset in minutes (default IST = +05:30 = 330 min).
+const TZ_OFFSET_MIN = parseInt(process.env.ZKTECO_TZ_OFFSET_MINUTES || '330', 10);
+
 const toDateKey = (d) => {
-  // Local-date key (YYYY-MM-DD) — attendance is bucketed per local day.
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
+  // Shift to configured timezone before extracting the calendar date so the
+  // date bucket matches the device's local day, not the server's.
+  const local = new Date(d.getTime() + TZ_OFFSET_MIN * 60_000);
+  const yyyy = local.getUTCFullYear();
+  const mm = String(local.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(local.getUTCDate()).padStart(2, '0');
   return `${yyyy}-${mm}-${dd}`;
 };
 
 const isLate = (punchTime, officeStart) => {
   if (!officeStart) return false;
   const [h, m] = String(officeStart).split(':').map(Number);
-  const cutoff = new Date(punchTime);
-  cutoff.setHours(h, m || 0, 0, 0);
-  return punchTime > cutoff;
+  // Compare in the configured timezone so office_start_time is interpreted
+  // as device-local time regardless of the server's TZ environment variable.
+  const local = new Date(punchTime.getTime() + TZ_OFFSET_MIN * 60_000);
+  const punchMinutes = local.getUTCHours() * 60 + local.getUTCMinutes();
+  return punchMinutes > h * 60 + (m || 0);
 };
 
 /**
