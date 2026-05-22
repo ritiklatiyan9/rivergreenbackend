@@ -18,9 +18,10 @@ const pool = new Pool({
   user: dbUser,
   password: dbPassword,
   ssl: sslOption,
-  max: 10,
-  idleTimeoutMillis: 20000,
-  connectionTimeoutMillis: 10000,
+  max: 20,
+  idleTimeoutMillis: 5000,
+  connectionTimeoutMillis: 5000,
+  statement_timeout: 30000,
   allowExitOnIdle: false,
 });
 

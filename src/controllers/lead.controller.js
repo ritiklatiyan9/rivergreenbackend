@@ -5,7 +5,7 @@ import callModel from '../models/Call.model.js';
 import pool from '../config/db.js';
 import { bustCache } from '../middlewares/cache.middleware.js';
 import { read as xlsxRead, utils as xlsxUtils } from 'xlsx';
-import fs from 'fs';
+import fs from 'fs/promises';
 import { leadImportQueue } from '../utils/jobQueue.js';
 import { uploadSingle } from '../utils/upload.js';
 
@@ -159,6 +159,8 @@ export const getMatterLeadsList = asyncHandler(async (req, res) => {
 
     if (user.role === 'AGENT' || user.role === 'TEAM_HEAD') {
         filters.owner_or_assigned = user.id;
+    } else if (req.query.owner_or_assigned) {
+        filters.owner_or_assigned = req.query.owner_or_assigned;
     } else if (req.query.assigned_to) {
         filters.assigned_to = req.query.assigned_to;
     }
@@ -197,6 +199,8 @@ export const getLeads = asyncHandler(async (req, res) => {
     // Agents & Team Heads see only leads they own or are assigned to
     if (req.user.role === 'AGENT' || req.user.role === 'TEAM_HEAD') {
         filters.owner_or_assigned = req.user.id;
+    } else if (req.query.owner_or_assigned) {
+        filters.owner_or_assigned = req.query.owner_or_assigned;
     } else if (req.query.assigned_to) {
         filters.assigned_to = req.query.assigned_to;
     }
@@ -230,8 +234,10 @@ export const getLead = asyncHandler(async (req, res) => {
         return res.status(403).json({ success: false, message: 'Not authorized to view this lead' });
     }
 
-    const assignee = lead.assigned_to ? await userModel.findById(lead.assigned_to, pool) : null;
-    const owner = lead.owner_id ? await userModel.findById(lead.owner_id, pool) : null;
+    const [assignee, owner] = await Promise.all([
+        lead.assigned_to ? userModel.findById(lead.assigned_to, pool) : null,
+        lead.owner_id    ? userModel.findById(lead.owner_id,    pool) : null,
+    ]);
 
     res.json({
         success: true,
@@ -522,23 +528,21 @@ export const getLeadFullDetails = asyncHandler(async (req, res) => {
         return res.status(403).json({ success: false, message: 'Not authorized to view this lead' });
     }
 
-    const assignee = lead.assigned_to ? await userModel.findById(lead.assigned_to, pool) : null;
-    const owner = lead.owner_id ? await userModel.findById(lead.owner_id, pool) : null;
-
-    // Get call history
-    const calls = await callModel.findByLead(req.params.id, pool);
-
-    // Get followups/appointments
-    const followupsResult = await pool.query(
-        `SELECT f.*, u_agent.name as agent_name, co.label as outcome_label
-         FROM followups f
-         LEFT JOIN users u_agent ON f.assigned_to = u_agent.id
-         LEFT JOIN calls c ON f.call_id = c.id
-         LEFT JOIN call_outcomes co ON c.outcome_id = co.id
-         WHERE f.lead_id = $1
-         ORDER BY f.scheduled_at DESC`,
-        [req.params.id]
-    );
+    const [assignee, owner, calls, followupsResult] = await Promise.all([
+        lead.assigned_to ? userModel.findById(lead.assigned_to, pool) : null,
+        lead.owner_id    ? userModel.findById(lead.owner_id,    pool) : null,
+        callModel.findByLead(req.params.id, pool),
+        pool.query(
+            `SELECT f.*, u_agent.name as agent_name, co.label as outcome_label
+             FROM followups f
+             LEFT JOIN users u_agent ON f.assigned_to = u_agent.id
+             LEFT JOIN calls c ON f.call_id = c.id
+             LEFT JOIN call_outcomes co ON c.outcome_id = co.id
+             WHERE f.lead_id = $1
+             ORDER BY f.scheduled_at DESC`,
+            [req.params.id]
+        ),
+    ]);
 
     res.json({
         success: true,
@@ -566,13 +570,13 @@ export const bulkUploadLeads = asyncHandler(async (req, res) => {
 
     const siteId = await getSiteId(req.user.id, req.user);
     if (!siteId) {
-        try { fs.unlinkSync(filePath); } catch { }
+        fs.unlink(filePath).catch(() => {});
         return res.status(404).json({ success: false, message: 'No site assigned to this user' });
     }
 
     let workbook;
     try {
-        const buffer = fs.readFileSync(filePath);
+        const buffer = await fs.readFile(filePath);
         workbook = xlsxRead(buffer, { type: 'buffer' });
     } catch (err) {
         console.error(`[BulkUpload] Parse error:`, err.message);
@@ -581,7 +585,7 @@ export const bulkUploadLeads = asyncHandler(async (req, res) => {
             message: 'Could not parse file. Please upload a valid .xlsx or .csv file',
         });
     } finally {
-        try { fs.unlinkSync(filePath); } catch { }
+        fs.unlink(filePath).catch(() => {});
     }
 
     const sheetName = workbook.SheetNames[0];

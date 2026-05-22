@@ -4,10 +4,25 @@ import { bustCache } from '../middlewares/cache.middleware.js';
 import fcmService from '../services/fcm.service.js';
 
 const bustSupervisionCache = () => {
-  // Cache keys are `cache:{userId}:{siteId}:{originalUrl}` — need two
-  // wildcards between `cache:` and the URL, otherwise the bust never matches.
   bustCache('cache:*:*:/api/supervision-tasks*');
 };
+
+// Ensure the due_time column exists (idempotent, runs once on first import).
+const ensureDueTimeColumn = (() => {
+  let done = false;
+  return async () => {
+    if (done) return;
+    await pool.query(
+      `ALTER TABLE supervision_tasks ADD COLUMN IF NOT EXISTS due_time TIME`
+    );
+    done = true;
+  };
+})();
+
+// Run migration eagerly on module load (non-blocking).
+ensureDueTimeColumn().catch((e) =>
+  console.error('[supervisionTask] due_time migration failed:', e.message)
+);
 
 // Fire-and-forget FCM helper (same pattern as chat/booking).
 const pushTaskNotification = (recipientIds, payload) => {
@@ -51,7 +66,7 @@ const isPrivileged = (role) => ['ADMIN', 'OWNER'].includes(String(role || '').to
 
 // ── CREATE TASK (Admin assigns to Supervisor) ─────────────────────────────
 export const createSupervisionTask = asyncHandler(async (req, res) => {
-  const { title, description, assigned_to, site_id, priority, due_date, admin_attachments } = req.body;
+  const { title, description, assigned_to, site_id, priority, due_date, due_time, admin_attachments } = req.body;
   if (!title || !assigned_to) {
     return res.status(400).json({ success: false, message: 'Title and assigned supervisor are required' });
   }
@@ -66,8 +81,8 @@ export const createSupervisionTask = asyncHandler(async (req, res) => {
 
   const result = await pool.query(
     `INSERT INTO supervision_tasks
-       (title, description, assigned_to, assigned_by, site_id, priority, due_date, admin_attachments)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+       (title, description, assigned_to, assigned_by, site_id, priority, due_date, due_time, admin_attachments)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
      RETURNING *`,
     [
       title,
@@ -77,6 +92,7 @@ export const createSupervisionTask = asyncHandler(async (req, res) => {
       site_id || null,
       priority || 'MEDIUM',
       due_date || null,
+      due_time || null,
       JSON.stringify(cleanedAdminAttachments),
     ]
   );
@@ -183,7 +199,7 @@ export const getSupervisionTask = asyncHandler(async (req, res) => {
 export const updateSupervisionTask = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const {
-    title, description, assigned_to, site_id, priority, due_date, status,
+    title, description, assigned_to, site_id, priority, due_date, due_time, status,
     admin_attachments, proof_attachments,
   } = req.body;
 
@@ -252,10 +268,10 @@ export const updateSupervisionTask = asyncHandler(async (req, res) => {
   const result = await pool.query(
     `UPDATE supervision_tasks
      SET title = $1, description = $2, assigned_to = $3, site_id = $4,
-         priority = $5, due_date = $6, status = $7, completed_at = $8,
-         admin_attachments = $9::jsonb, proof_attachments = $10::jsonb,
+         priority = $5, due_date = $6, due_time = $7, status = $8, completed_at = $9,
+         admin_attachments = $10::jsonb, proof_attachments = $11::jsonb,
          updated_at = NOW()
-     WHERE id = $11
+     WHERE id = $12
      RETURNING *`,
     [
       title || task.title,
@@ -264,6 +280,7 @@ export const updateSupervisionTask = asyncHandler(async (req, res) => {
       site_id !== undefined ? site_id : task.site_id,
       priority || task.priority,
       due_date !== undefined ? due_date : task.due_date,
+      due_time !== undefined ? due_time : task.due_time,
       status || task.status,
       completedAt,
       JSON.stringify(nextAdminAttachments),
@@ -311,94 +328,95 @@ export const getSupervisionAnalytics = asyncHandler(async (req, res) => {
   const userId = req.user.id;
 
   if (!isPrivileged(userRole)) {
-    // Non-admin assignees see only their own analytics
-    const stats = await pool.query(
+    // Non-admin assignees see only their own analytics — both queries in parallel
+    const [stats, recentCompleted] = await Promise.all([
+      pool.query(
+        `SELECT
+           COUNT(*) AS total,
+           COUNT(*) FILTER (WHERE status = 'PENDING') AS pending,
+           COUNT(*) FILTER (WHERE status = 'IN_PROGRESS') AS in_progress,
+           COUNT(*) FILTER (WHERE status = 'COMPLETED') AS completed,
+           COUNT(*) FILTER (WHERE status = 'OVERDUE') AS overdue,
+           COUNT(*) FILTER (WHERE status = 'COMPLETED' AND completed_at IS NOT NULL) AS completed_with_time,
+           AVG(EXTRACT(EPOCH FROM (completed_at - created_at)) / 3600)
+             FILTER (WHERE status = 'COMPLETED' AND completed_at IS NOT NULL) AS avg_completion_hours,
+           COUNT(*) FILTER (WHERE due_date IS NOT NULL AND status = 'COMPLETED' AND completed_at <= due_date) AS on_time,
+           COUNT(*) FILTER (WHERE due_date IS NOT NULL AND status = 'COMPLETED' AND completed_at > due_date) AS late
+         FROM supervision_tasks
+         WHERE assigned_to = $1`,
+        [userId]
+      ),
+      pool.query(
+        `SELECT st.*, s.name AS site_name
+         FROM supervision_tasks st
+         LEFT JOIN sites s ON st.site_id = s.id
+         WHERE st.assigned_to = $1 AND st.status = 'COMPLETED'
+         ORDER BY st.completed_at DESC LIMIT 5`,
+        [userId]
+      ),
+    ]);
+
+    return res.json({
+      success: true,
+      analytics: {
+        ...stats.rows[0],
+        recent_completed: recentCompleted.rows,
+      },
+    });
+  }
+
+  // Admin/Owner: all three queries in parallel
+  const [overallStats, perSupervisor, recentActivity] = await Promise.all([
+    pool.query(
       `SELECT
          COUNT(*) AS total,
          COUNT(*) FILTER (WHERE status = 'PENDING') AS pending,
          COUNT(*) FILTER (WHERE status = 'IN_PROGRESS') AS in_progress,
          COUNT(*) FILTER (WHERE status = 'COMPLETED') AS completed,
          COUNT(*) FILTER (WHERE status = 'OVERDUE') AS overdue,
-         COUNT(*) FILTER (WHERE status = 'COMPLETED' AND completed_at IS NOT NULL) AS completed_with_time,
          AVG(EXTRACT(EPOCH FROM (completed_at - created_at)) / 3600)
            FILTER (WHERE status = 'COMPLETED' AND completed_at IS NOT NULL) AS avg_completion_hours,
          COUNT(*) FILTER (WHERE due_date IS NOT NULL AND status = 'COMPLETED' AND completed_at <= due_date) AS on_time,
          COUNT(*) FILTER (WHERE due_date IS NOT NULL AND status = 'COMPLETED' AND completed_at > due_date) AS late
-       FROM supervision_tasks
-       WHERE assigned_to = $1`,
-      [userId]
-    );
-
-    const recentCompleted = await pool.query(
-      `SELECT st.*, s.name AS site_name
+       FROM supervision_tasks`
+    ),
+    pool.query(
+      `SELECT
+         u.id AS supervisor_id,
+         u.name AS supervisor_name,
+         u.email AS supervisor_email,
+         COUNT(st.id) AS total,
+         COUNT(st.id) FILTER (WHERE st.status = 'PENDING') AS pending,
+         COUNT(st.id) FILTER (WHERE st.status = 'IN_PROGRESS') AS in_progress,
+         COUNT(st.id) FILTER (WHERE st.status = 'COMPLETED') AS completed,
+         COUNT(st.id) FILTER (WHERE st.status = 'OVERDUE') AS overdue,
+         AVG(EXTRACT(EPOCH FROM (st.completed_at - st.created_at)) / 3600)
+           FILTER (WHERE st.status = 'COMPLETED' AND st.completed_at IS NOT NULL) AS avg_completion_hours
+       FROM users u
+       LEFT JOIN supervision_tasks st ON st.assigned_to = u.id
+       WHERE u.role = 'SUPERVISOR'
+       GROUP BY u.id, u.name, u.email
+       ORDER BY u.name`
+    ),
+    pool.query(
+      `SELECT st.*,
+              u.name AS assigned_to_name,
+              s.name AS site_name
        FROM supervision_tasks st
+       LEFT JOIN users u ON st.assigned_to = u.id
        LEFT JOIN sites s ON st.site_id = s.id
-       WHERE st.assigned_to = $1 AND st.status = 'COMPLETED'
-       ORDER BY st.completed_at DESC LIMIT 5`,
-      [userId]
-    );
-
-    return res.json({
-      success: true,
-      analytics: {
-        ...stats.rows[0],
-        recent_completed: recentCompleted.rows
-      }
-    });
-  }
-
-  // Admin/Owner: all supervisors analytics
-  const overallStats = await pool.query(
-    `SELECT
-       COUNT(*) AS total,
-       COUNT(*) FILTER (WHERE status = 'PENDING') AS pending,
-       COUNT(*) FILTER (WHERE status = 'IN_PROGRESS') AS in_progress,
-       COUNT(*) FILTER (WHERE status = 'COMPLETED') AS completed,
-       COUNT(*) FILTER (WHERE status = 'OVERDUE') AS overdue,
-       AVG(EXTRACT(EPOCH FROM (completed_at - created_at)) / 3600)
-         FILTER (WHERE status = 'COMPLETED' AND completed_at IS NOT NULL) AS avg_completion_hours,
-       COUNT(*) FILTER (WHERE due_date IS NOT NULL AND status = 'COMPLETED' AND completed_at <= due_date) AS on_time,
-       COUNT(*) FILTER (WHERE due_date IS NOT NULL AND status = 'COMPLETED' AND completed_at > due_date) AS late
-     FROM supervision_tasks`
-  );
-
-  const perSupervisor = await pool.query(
-    `SELECT
-       u.id AS supervisor_id,
-       u.name AS supervisor_name,
-       u.email AS supervisor_email,
-       COUNT(st.id) AS total,
-       COUNT(st.id) FILTER (WHERE st.status = 'PENDING') AS pending,
-       COUNT(st.id) FILTER (WHERE st.status = 'IN_PROGRESS') AS in_progress,
-       COUNT(st.id) FILTER (WHERE st.status = 'COMPLETED') AS completed,
-       COUNT(st.id) FILTER (WHERE st.status = 'OVERDUE') AS overdue,
-       AVG(EXTRACT(EPOCH FROM (st.completed_at - st.created_at)) / 3600)
-         FILTER (WHERE st.status = 'COMPLETED' AND st.completed_at IS NOT NULL) AS avg_completion_hours
-     FROM users u
-     LEFT JOIN supervision_tasks st ON st.assigned_to = u.id
-     WHERE u.role = 'SUPERVISOR'
-     GROUP BY u.id, u.name, u.email
-     ORDER BY u.name`
-  );
-
-  const recentActivity = await pool.query(
-    `SELECT st.*,
-            u.name AS assigned_to_name,
-            s.name AS site_name
-     FROM supervision_tasks st
-     LEFT JOIN users u ON st.assigned_to = u.id
-     LEFT JOIN sites s ON st.site_id = s.id
-     ORDER BY st.updated_at DESC
-     LIMIT 10`
-  );
+       ORDER BY st.updated_at DESC
+       LIMIT 10`
+    ),
+  ]);
 
   res.json({
     success: true,
     analytics: {
       overall: overallStats.rows[0],
       per_supervisor: perSupervisor.rows,
-      recent_activity: recentActivity.rows
-    }
+      recent_activity: recentActivity.rows,
+    },
   });
 });
 

@@ -493,7 +493,7 @@ export const getTeamMembersPerformance = asyncHandler(async (req, res) => {
         COUNT(*) FILTER (WHERE l.status = 'NEW') as new_leads,
         COUNT(*) FILTER (WHERE l.status = 'INTERESTED') as interested_leads,
         COUNT(*) FILTER (WHERE l.status = 'BOOKED') as booked_leads
-      FROM leads l WHERE l.assigned_to = u.id
+      FROM leads l WHERE (l.assigned_to = u.id OR l.owner_id = u.id)
     ) lead_stats ON true
     LEFT JOIN LATERAL (
       SELECT
