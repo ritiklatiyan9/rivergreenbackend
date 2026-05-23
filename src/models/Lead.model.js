@@ -191,7 +191,7 @@ class LeadModel extends MasterModel {
             FROM leads l
             INNER JOIN LATERAL (
                 SELECT 1 FROM calls c
-                WHERE c.lead_id = l.id
+                WHERE c.lead_id = l.id AND c.duration_seconds > 0
                 LIMIT 1
             ) _c ON TRUE
             ${whereString}
