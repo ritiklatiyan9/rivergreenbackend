@@ -432,6 +432,142 @@ export const registerTeamAgent = asyncHandler(async (req, res) => {
 });
 
 // ============================================================
+// AGENT - REGISTER SUB-AGENT
+// ============================================================
+
+export const registerSubAgent = asyncHandler(async (req, res) => {
+  const { name, email, password, phone } = req.body;
+
+  if (!name || !email || !password) {
+    return res.status(400).json({ success: false, message: 'Name, email and password are required' });
+  }
+
+  const actor = await userModel.findById(req.user.id, pool);
+  if (!actor || !actor.site_id) {
+    return res.status(404).json({ success: false, message: 'No site assigned' });
+  }
+
+  const isAllowed = ['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER'].includes(actor.role);
+  if (!isAllowed) {
+    return res.status(403).json({ success: false, message: 'Only agents or above can register sub-agents' });
+  }
+
+  if (!actor.team_id) {
+    return res.status(400).json({ success: false, message: 'You must be assigned to a team before registering sub-agents' });
+  }
+
+  const existing = await userModel.findByEmail(email, pool);
+  if (existing) {
+    return res.status(400).json({ success: false, message: 'Email already exists' });
+  }
+
+  const sponsorCode = await userModel.getUniqueSponsorCode(pool);
+  const hashedPassword = await hashPassword(password);
+
+  const newUser = await userModel.create({
+    name,
+    email,
+    phone: phone || null,
+    password: hashedPassword,
+    role: 'SUB_AGENT',
+    site_id: actor.site_id,
+    team_id: actor.team_id,
+    sponsor_code: sponsorCode,
+    sponsor_id: actor.id,
+    parent_id: actor.id,
+    token_version: 1,
+    created_by: actor.id,
+  }, pool);
+
+  bustCache('cache:*:/api/teams*');
+  bustCache('cache:*:/api/site/users*');
+
+  res.status(201).json({
+    success: true,
+    message: 'Sub-agent registered successfully',
+    user: sanitizeUser(newUser),
+  });
+});
+
+// ============================================================
+// AGENT - GET OWN SUB-AGENTS WITH PERFORMANCE
+// ============================================================
+
+export const getMySubAgents = asyncHandler(async (req, res) => {
+  const actor = await userModel.findByIdSafe(req.user.id, pool);
+  if (!actor) {
+    return res.status(404).json({ success: false, message: 'User not found' });
+  }
+
+  const subAgentsQuery = `
+    SELECT
+      u.id,
+      u.name,
+      u.email,
+      u.phone,
+      u.role,
+      u.is_active,
+      u.profile_photo,
+      u.sponsor_code,
+      u.created_at,
+      COALESCE(lead_stats.total_leads, 0)::int as total_leads,
+      COALESCE(lead_stats.booked_leads, 0)::int as booked_leads,
+      COALESCE(call_stats.total_calls, 0)::int as total_calls,
+      COALESCE(call_stats.calls_today, 0)::int as calls_today,
+      COALESCE(booking_stats.total_bookings, 0)::int as total_bookings,
+      COALESCE(booking_stats.total_revenue, 0)::numeric as total_revenue,
+      COALESCE(followup_stats.total_followups, 0)::int as total_followups,
+      COALESCE(followup_stats.completed_followups, 0)::int as completed_followups,
+      CASE
+        WHEN COALESCE(lead_stats.total_leads, 0) > 0
+        THEN ROUND(COALESCE(booking_stats.total_bookings, 0)::numeric / lead_stats.total_leads * 100, 1)
+        ELSE 0
+      END as conversion_rate
+    FROM users u
+    LEFT JOIN LATERAL (
+      SELECT
+        COUNT(*) as total_leads,
+        COUNT(*) FILTER (WHERE l.status = 'BOOKED') as booked_leads
+      FROM leads l WHERE (l.assigned_to = u.id OR l.owner_id = u.id)
+    ) lead_stats ON true
+    LEFT JOIN LATERAL (
+      SELECT
+        COUNT(*) as total_calls,
+        COUNT(*) FILTER (WHERE c.call_start::date = CURRENT_DATE) as calls_today
+      FROM calls c WHERE c.assigned_to = u.id
+    ) call_stats ON true
+    LEFT JOIN LATERAL (
+      SELECT
+        COUNT(*) as total_bookings,
+        COALESCE(SUM(pb.total_amount), 0) as total_revenue
+      FROM plot_bookings pb WHERE pb.booked_by = u.id
+    ) booking_stats ON true
+    LEFT JOIN LATERAL (
+      SELECT
+        COUNT(*) as total_followups,
+        COUNT(*) FILTER (WHERE f.status = 'COMPLETED') as completed_followups
+      FROM followups f WHERE f.assigned_to = u.id
+    ) followup_stats ON true
+    WHERE u.parent_id = $1 AND u.role = 'SUB_AGENT'
+    ORDER BY total_revenue DESC, u.name
+  `;
+
+  const result = await pool.query(subAgentsQuery, [actor.id]);
+
+  res.json({
+    success: true,
+    sub_agents: result.rows,
+    total: result.rows.length,
+    agent: {
+      id: actor.id,
+      name: actor.name,
+      sponsor_code: actor.sponsor_code,
+      team_id: actor.team_id,
+    },
+  });
+});
+
+// ============================================================
 // TEAM MEMBERS PERFORMANCE (per-member breakdown)
 // ============================================================
 

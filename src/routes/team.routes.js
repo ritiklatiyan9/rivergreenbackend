@@ -13,6 +13,8 @@ import {
   moveAgent,
   removeTeamMember,
   registerTeamAgent,
+  registerSubAgent,
+  getMySubAgents,
   getTeamPerformance,
   getTeamMembersPerformance,
   getAllTeamsPerformance,
@@ -31,6 +33,10 @@ router.get('/all/performance', authMiddleware, checkRole(['ADMIN', 'SUPERVISOR']
 
 // Current user's own team (agent & team_head friendly)
 router.get('/my', authMiddleware, cacheMiddleware(120), getMyTeam);
+
+// Sub-agent management (AGENT registers/views own sub-agents)
+router.post('/my/register-sub-agent', authMiddleware, checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN']), registerSubAgent);
+router.get('/my/sub-agents', authMiddleware, getMySubAgents);
 
 // Read-only access for agents & team heads (own team)
 router.get('/:id', authMiddleware, cacheMiddleware(300), getTeam);

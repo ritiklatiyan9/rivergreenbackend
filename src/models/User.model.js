@@ -85,9 +85,10 @@ class UserModel extends MasterModel {
           WHEN 'SUPERVISOR' THEN 2
           WHEN 'TEAM_HEAD' THEN 3
           WHEN 'AGENT' THEN 4
-          WHEN 'STAFF' THEN 5
-          WHEN 'CLIENT' THEN 6
-          WHEN 'VISITOR' THEN 7
+          WHEN 'SUB_AGENT' THEN 5
+          WHEN 'STAFF' THEN 6
+          WHEN 'CLIENT' THEN 7
+          WHEN 'VISITOR' THEN 8
         END,
         u.created_at DESC
     `;
