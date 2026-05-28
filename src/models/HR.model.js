@@ -229,7 +229,78 @@ class SalaryPaymentModel extends MasterModel {
   }
 }
 
-export const hrSettingsModel    = new HrSettingsModel();
-export const userSalaryModel    = new UserSalaryModel();
-export const hrLeaveModel       = new HrLeaveModel();
-export const salaryPaymentModel = new SalaryPaymentModel();
+// ── Per-user HR override (working_days / hours / timings, etc.) ───
+// Stores a row per user with NULLABLE columns. NULL = inherit site
+// policy. Lets admin override a single field without copying the rest.
+class UserHrOverrideModel extends MasterModel {
+  constructor() {
+    super('user_hr_overrides');
+  }
+
+  async findByUser(userId, pool) {
+    const r = await pool.query(
+      `SELECT * FROM ${this.tableName} WHERE user_id = $1 LIMIT 1`,
+      [userId],
+    );
+    return r.rows[0] || null;
+  }
+
+  // Bulk fetch for the per-site users list so the bulk salary suggestion
+  // and calendar endpoints can merge overrides in one round-trip.
+  async findManyByUserIds(userIds, pool) {
+    if (!Array.isArray(userIds) || userIds.length === 0) return new Map();
+    const r = await pool.query(
+      `SELECT * FROM ${this.tableName} WHERE user_id = ANY($1::uuid[])`,
+      [userIds],
+    );
+    const m = new Map();
+    for (const row of r.rows) m.set(row.user_id, row);
+    return m;
+  }
+
+  // Idempotent merge: sets the fields in `data` and leaves the rest alone.
+  // `data` keys not present remain at their existing NULL/value.
+  async upsert(userId, siteId, data, pool) {
+    const existing = await this.findByUser(userId, pool);
+    if (existing) {
+      return this.update(existing.id, { ...data, updated_at: new Date() }, pool);
+    }
+    return this.create({ user_id: userId, site_id: siteId, ...data }, pool);
+  }
+
+  async deleteByUser(userId, pool) {
+    const r = await pool.query(
+      `DELETE FROM ${this.tableName} WHERE user_id = $1 RETURNING *`,
+      [userId],
+    );
+    return r.rows[0] || null;
+  }
+
+  // Per-site listing: every active panel-user with their override row (if any).
+  // Drives the "users with custom hours" view in HR Settings.
+  async listAllWithOverrides({ siteId }, pool) {
+    const params = [];
+    const where = [`u.role IN ('ADMIN','SUPERVISOR','TEAM_HEAD','AGENT')`, `u.is_active = true`];
+    if (siteId) { params.push(siteId); where.push(`u.site_id = $${params.length}`); }
+    const sql = `
+      SELECT
+        u.id, u.name, u.email, u.role, u.profile_photo, u.site_id,
+        o.id AS override_id,
+        o.working_days, o.working_hours, o.work_start_time, o.work_end_time,
+        o.paid_leaves_per_month, o.half_day_threshold_hours, o.late_grace_minutes,
+        o.notes, o.updated_at AS override_updated_at
+      FROM users u
+      LEFT JOIN ${this.tableName} o ON o.user_id = u.id
+      WHERE ${where.join(' AND ')}
+      ORDER BY u.name ASC
+    `;
+    const r = await pool.query(sql, params);
+    return r.rows;
+  }
+}
+
+export const hrSettingsModel     = new HrSettingsModel();
+export const userSalaryModel     = new UserSalaryModel();
+export const hrLeaveModel        = new HrLeaveModel();
+export const salaryPaymentModel  = new SalaryPaymentModel();
+export const userHrOverrideModel = new UserHrOverrideModel();

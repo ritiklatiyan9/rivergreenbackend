@@ -6,6 +6,7 @@ import {
   userSalaryModel,
   hrLeaveModel,
   salaryPaymentModel,
+  userHrOverrideModel,
 } from '../models/HR.model.js';
 import { computeMonthlySalary } from '../services/hrSalary.service.js';
 
@@ -35,6 +36,65 @@ const monthBounds = (year, month) => {
   const lastDay = new Date(year, month, 0).getDate();
   const end = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
   return { start, end };
+};
+
+// Merge a per-user override row into the site policy. NULL columns on the
+// override inherit from site. Returns a fresh object — callers shouldn't
+// mutate site settings. Holidays + working_days arrays are deep-cloned
+// (working_days replaces, holidays always come from site).
+const mergeEffectiveSettings = (siteSettings, override) => {
+  if (!override) return siteSettings;
+  const out = { ...siteSettings };
+  const copy = (k) => {
+    if (override[k] !== null && override[k] !== undefined) out[k] = override[k];
+  };
+  copy('working_days');
+  copy('working_hours');
+  copy('work_start_time');
+  copy('work_end_time');
+  copy('paid_leaves_per_month');
+  copy('half_day_threshold_hours');
+  copy('late_grace_minutes');
+  return out;
+};
+
+// Validate + normalize the fields accepted from PUT /hr/user-overrides/:userId.
+// Returns either { error: string } or { value: { ...sanitized } }.
+// A field set to null/empty-string is explicitly *cleared* (inherit site).
+const sanitizeOverrideInput = (body) => {
+  const out = {};
+  const has = (k) => Object.prototype.hasOwnProperty.call(body, k);
+  const setNullable = (k, parse, validate) => {
+    if (!has(k)) return null;
+    const v = body[k];
+    if (v === null || v === '' || v === undefined) { out[k] = null; return null; }
+    const parsed = parse(v);
+    if (validate && !validate(parsed)) return `Invalid ${k}`;
+    out[k] = parsed;
+    return null;
+  };
+
+  if (has('working_days')) {
+    const v = body.working_days;
+    if (v === null) {
+      out.working_days = null;
+    } else if (!Array.isArray(v) || v.some((d) => !Number.isInteger(d) || d < 1 || d > 7)) {
+      return { error: 'working_days must be integers 1..7 (Mon..Sun) or null' };
+    } else {
+      out.working_days = [...new Set(v)].sort((a, b) => a - b);
+    }
+  }
+  let err = null;
+  err = err || setNullable('working_hours', Number, (n) => Number.isFinite(n) && n >= 0 && n <= 24);
+  err = err || setNullable('work_start_time', String, (s) => /^\d{2}:\d{2}(:\d{2})?$/.test(s));
+  err = err || setNullable('work_end_time', String, (s) => /^\d{2}:\d{2}(:\d{2})?$/.test(s));
+  err = err || setNullable('paid_leaves_per_month', (v) => parseInt(v, 10), (n) => Number.isInteger(n) && n >= 0 && n <= 31);
+  err = err || setNullable('half_day_threshold_hours', Number, (n) => Number.isFinite(n) && n >= 0 && n <= 24);
+  err = err || setNullable('late_grace_minutes', (v) => parseInt(v, 10), (n) => Number.isInteger(n) && n >= 0 && n <= 240);
+  if (err) return { error: err };
+
+  if (has('notes')) out.notes = body.notes === null ? null : String(body.notes).slice(0, 1000);
+  return { value: out };
 };
 
 const fetchAttendanceForUserMonth = async (userId, year, month, pool_) => {
@@ -172,7 +232,7 @@ export const getAttendanceCalendarBulk = asyncHandler(async (req, res) => {
   const userIds = usersRes.rows.map((u) => u.id);
   const { start, end } = monthBounds(yYm.year, yYm.month);
 
-  const [attRes, lvRes] = userIds.length > 0
+  const [attRes, lvRes, overrideMap] = userIds.length > 0
     ? await Promise.all([
         pool.query(
           `SELECT user_id, date, status, check_in_time, check_out_time, is_secondary
@@ -186,8 +246,9 @@ export const getAttendanceCalendarBulk = asyncHandler(async (req, res) => {
            WHERE leave_date BETWEEN $1 AND $2 AND user_id = ANY($3::uuid[])`,
           [start, end, userIds],
         ),
+        userHrOverrideModel.findManyByUserIds(userIds, pool),
       ])
-    : [{ rows: [] }, { rows: [] }];
+    : [{ rows: [] }, { rows: [] }, new Map()];
 
   const attByUser = new Map();
   for (const r of attRes.rows) {
@@ -201,11 +262,12 @@ export const getAttendanceCalendarBulk = asyncHandler(async (req, res) => {
   }
 
   const users = usersRes.rows.map((u) => {
+    const effectiveSettings = mergeEffectiveSettings(settings, overrideMap.get(u.id));
     const calc = computeMonthlySalary({
       userId: u.id,
       year: yYm.year,
       month: yYm.month,
-      hrSettings: settings,
+      hrSettings: effectiveSettings,
       monthlySalary: u.monthly_salary || 0,
       attendance: attByUser.get(u.id) || [],
       leaves: lvByUser.get(u.id) || [],
@@ -243,6 +305,8 @@ export const getAttendanceCalendar = asyncHandler(async (req, res) => {
   const siteId = u.rows[0].site_id || req.user.site_id;
 
   const settings = await hrSettingsModel.findOrCreateBySite(siteId, req.user.id, pool);
+  const override = await userHrOverrideModel.findByUser(userId, pool);
+  const effectiveSettings = mergeEffectiveSettings(settings, override);
   const active = await userSalaryModel.findActive(userId, pool);
   const attendance = await fetchAttendanceForUserMonth(userId, yYm.year, yYm.month, pool);
   const leaves = await fetchLeavesForUserMonth(userId, yYm.year, yYm.month, pool);
@@ -251,7 +315,7 @@ export const getAttendanceCalendar = asyncHandler(async (req, res) => {
     userId,
     year: yYm.year,
     month: yYm.month,
-    hrSettings: settings,
+    hrSettings: effectiveSettings,
     monthlySalary: active?.monthly_salary || 0,
     attendance,
     leaves,
@@ -262,6 +326,8 @@ export const getAttendanceCalendar = asyncHandler(async (req, res) => {
     success: true,
     user: u.rows[0],
     settings,
+    effective_settings: effectiveSettings,
+    override,
     active_salary: active,
     ...result,
   });
@@ -331,8 +397,8 @@ export const suggestPayrollAll = asyncHandler(async (req, res) => {
   const userIds = usersRes.rows.map((u) => u.id);
   const { start, end } = monthBounds(yYm.year, yYm.month);
 
-  // One round-trip for attendance + leaves across all users in the month.
-  const [attRes, lvRes, payRes] = await Promise.all([
+  // One round-trip for attendance + leaves + overrides across all users.
+  const [attRes, lvRes, payRes, overrideMap] = await Promise.all([
     pool.query(
       `SELECT user_id, date, status, check_in_time, check_out_time, is_secondary
        FROM attendance_records
@@ -350,6 +416,7 @@ export const suggestPayrollAll = asyncHandler(async (req, res) => {
        WHERE period_year = $1 AND period_month = $2 AND user_id = ANY($3::uuid[])`,
       [yYm.year, yYm.month, userIds],
     ),
+    userHrOverrideModel.findManyByUserIds(userIds, pool),
   ]);
 
   const attByUser = new Map();
@@ -366,11 +433,12 @@ export const suggestPayrollAll = asyncHandler(async (req, res) => {
   for (const r of payRes.rows) payByUser.set(r.user_id, r);
 
   const rows = usersRes.rows.map((u) => {
+    const effectiveSettings = mergeEffectiveSettings(settings, overrideMap.get(u.id));
     const calc = computeMonthlySalary({
       userId: u.id,
       year: yYm.year,
       month: yYm.month,
-      hrSettings: settings,
+      hrSettings: effectiveSettings,
       monthlySalary: u.monthly_salary || 0,
       attendance: attByUser.get(u.id) || [],
       leaves: lvByUser.get(u.id) || [],
@@ -408,6 +476,8 @@ export const suggestPayrollUser = asyncHandler(async (req, res) => {
   if (!u.rows[0]) return res.status(404).json({ success: false, message: 'User not found' });
   const siteId = u.rows[0].site_id || req.user.site_id;
   const settings = await hrSettingsModel.findOrCreateBySite(siteId, req.user.id, pool);
+  const override = await userHrOverrideModel.findByUser(userId, pool);
+  const effectiveSettings = mergeEffectiveSettings(settings, override);
   const active = await userSalaryModel.findActive(userId, pool);
   const attendance = await fetchAttendanceForUserMonth(userId, yYm.year, yYm.month, pool);
   const leaves = await fetchLeavesForUserMonth(userId, yYm.year, yYm.month, pool);
@@ -416,7 +486,7 @@ export const suggestPayrollUser = asyncHandler(async (req, res) => {
     userId,
     year: yYm.year,
     month: yYm.month,
-    hrSettings: settings,
+    hrSettings: effectiveSettings,
     monthlySalary: active?.monthly_salary || 0,
     attendance,
     leaves,
@@ -424,7 +494,7 @@ export const suggestPayrollUser = asyncHandler(async (req, res) => {
   });
 
   const payment = await salaryPaymentModel.findByPeriod({ userId, year: yYm.year, month: yYm.month }, pool);
-  res.json({ success: true, user: u.rows[0], settings, active_salary: active, payment, ...calc });
+  res.json({ success: true, user: u.rows[0], settings, effective_settings: effectiveSettings, override, active_salary: active, payment, ...calc });
 });
 
 // ═══════════════════════════════════════════════════════
@@ -459,12 +529,14 @@ export const recordPayment = asyncHandler(async (req, res) => {
   // Snapshot the calculation at the moment of payment so history doesn't
   // drift if attendance/leaves are edited later.
   const settings = await hrSettingsModel.findOrCreateBySite(siteId, req.user.id, pool);
+  const override = await userHrOverrideModel.findByUser(user_id, pool);
+  const effectiveSettings = mergeEffectiveSettings(settings, override);
   const active = await userSalaryModel.findActive(user_id, pool);
   const attendance = await fetchAttendanceForUserMonth(user_id, yYm.year, yYm.month, pool);
   const leaves = await fetchLeavesForUserMonth(user_id, yYm.year, yYm.month, pool);
   const calc = computeMonthlySalary({
     userId: user_id, year: yYm.year, month: yYm.month,
-    hrSettings: settings, monthlySalary: active?.monthly_salary || 0,
+    hrSettings: effectiveSettings, monthlySalary: active?.monthly_salary || 0,
     attendance, leaves, joinedAt: active?.joined_at || null,
   });
 
@@ -536,4 +608,71 @@ export const updatePaymentStatus = asyncHandler(async (req, res) => {
   if (!row) return res.status(404).json({ success: false, message: 'Payment not found' });
   bustCache('cache:*:/api/hr*');
   res.json({ success: true, payment: row });
+});
+
+// ═══════════════════════════════════════════════════════
+// PER-USER HR OVERRIDES (working hours / days)
+// ═══════════════════════════════════════════════════════
+// Shape served to the UI: { override, effective, site_defaults }.
+// `override` is the raw row (NULLs preserved → "inherits site default").
+// `effective` is what the salary engine actually uses for this user.
+// `site_defaults` lets the UI show ghost placeholders in the form.
+
+export const listUserOverrides = asyncHandler(async (req, res) => {
+  const siteId = requireSiteId(req, res);
+  if (!siteId) return;
+  const settings = await hrSettingsModel.findOrCreateBySite(siteId, req.user.id, pool);
+  const rows = await userHrOverrideModel.listAllWithOverrides({ siteId }, pool);
+  res.json({ success: true, site_defaults: settings, users: rows });
+});
+
+export const getUserOverride = asyncHandler(async (req, res) => {
+  const { userId } = req.params;
+  const u = await pool.query(`SELECT id, name, email, role, profile_photo, site_id FROM users WHERE id = $1`, [userId]);
+  if (!u.rows[0]) return res.status(404).json({ success: false, message: 'User not found' });
+  const siteId = u.rows[0].site_id || req.user.site_id;
+  if (!siteId) return res.status(400).json({ success: false, message: 'User has no site assignment' });
+
+  const settings = await hrSettingsModel.findOrCreateBySite(siteId, req.user.id, pool);
+  const override = await userHrOverrideModel.findByUser(userId, pool);
+  const effective = mergeEffectiveSettings(settings, override);
+  res.json({
+    success: true,
+    user: u.rows[0],
+    site_defaults: settings,
+    override,
+    effective,
+  });
+});
+
+export const upsertUserOverride = asyncHandler(async (req, res) => {
+  const { userId } = req.params;
+  const u = await pool.query(`SELECT id, site_id FROM users WHERE id = $1`, [userId]);
+  if (!u.rows[0]) return res.status(404).json({ success: false, message: 'User not found' });
+  const siteId = u.rows[0].site_id || req.user.site_id;
+  if (!siteId) return res.status(400).json({ success: false, message: 'User has no site assignment' });
+
+  const sanitized = sanitizeOverrideInput(req.body || {});
+  if (sanitized.error) return res.status(400).json({ success: false, message: sanitized.error });
+
+  // Cross-field check: if both times are being set explicitly (not cleared),
+  // require start < end so the calendar doesn't silently produce nonsense.
+  const v = sanitized.value;
+  if (v.work_start_time && v.work_end_time && v.work_start_time >= v.work_end_time) {
+    return res.status(400).json({ success: false, message: 'work_start_time must be earlier than work_end_time' });
+  }
+
+  const row = await userHrOverrideModel.upsert(userId, siteId, { ...v, updated_by: req.user.id }, pool);
+  const settings = await hrSettingsModel.findOrCreateBySite(siteId, req.user.id, pool);
+  const effective = mergeEffectiveSettings(settings, row);
+  bustCache('cache:*:/api/hr*');
+  res.json({ success: true, override: row, effective, site_defaults: settings });
+});
+
+export const deleteUserOverride = asyncHandler(async (req, res) => {
+  const { userId } = req.params;
+  const removed = await userHrOverrideModel.deleteByUser(userId, pool);
+  if (!removed) return res.status(404).json({ success: false, message: 'No override exists for this user' });
+  bustCache('cache:*:/api/hr*');
+  res.json({ success: true });
 });

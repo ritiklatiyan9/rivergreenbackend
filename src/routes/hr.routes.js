@@ -18,6 +18,10 @@ import {
   listPayments,
   getPayment,
   updatePaymentStatus,
+  listUserOverrides,
+  getUserOverride,
+  upsertUserOverride,
+  deleteUserOverride,
 } from '../controllers/hr.controller.js';
 
 const router = express.Router();
@@ -28,6 +32,12 @@ const adminOnly = checkRole(['ADMIN', 'OWNER']);
 // Settings
 router.get('/settings',  adminOnly, cacheMiddleware(60),  getSettings);
 router.put('/settings',  adminOnly, updateSettings);
+
+// Per-user overrides (working_days, working_hours, work_*_time, etc.)
+router.get('/user-overrides',          adminOnly, cacheMiddleware(30), listUserOverrides);
+router.get('/user-overrides/:userId',  adminOnly, getUserOverride);
+router.put('/user-overrides/:userId',  adminOnly, upsertUserOverride);
+router.delete('/user-overrides/:userId', adminOnly, deleteUserOverride);
 
 // Salaries
 router.get('/salaries',          adminOnly, cacheMiddleware(30), listSalaries);
