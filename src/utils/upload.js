@@ -5,19 +5,19 @@ import { cleanupFile } from '../middlewares/multer.middleware.js';
 export const uploadSingle = async (file, provider) => {
   const filePath = file.path;
   const mimetype = file.mimetype;
-  let result;
-
-  if (provider === 's3') {
-    // Keeping s3 behavior the same, returning just URL for backwards compat if S3 is ever used
-    const url = await uploadToS3(filePath, file.filename, mimetype);
-    result = { secure_url: url, public_id: null };
-  } else {
-    // Cloudinary now returns { secure_url, public_id }
-    result = await uploadToCloudinary(filePath, mimetype);
+  try {
+    if (provider === 's3') {
+      // Keeping s3 behavior the same, returning just URL for backwards compatibility.
+      const url = await uploadToS3(filePath, file.filename, mimetype);
+      return { secure_url: url, public_id: null };
+    }
+    // Cloudinary returns { secure_url, public_id }.
+    return await uploadToCloudinary(filePath, mimetype);
+  } finally {
+    // Multer writes to disk before provider upload. Always remove that temporary
+    // file, including when the remote provider rejects or times out.
+    cleanupFile(filePath);
   }
-
-  cleanupFile(filePath);
-  return result; // returning object now instead of string
 };
 
 export const uploadMany = async (files, provider) => {

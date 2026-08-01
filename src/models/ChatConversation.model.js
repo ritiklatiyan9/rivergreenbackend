@@ -63,7 +63,7 @@ class ChatConversationModel extends MasterModel {
   /**
    * Get all conversations for a user with last message and other participant info
    */
-  async getUserConversations(userId, pool) {
+  async getUserConversations(userId, siteId, pool) {
     const query = `
       SELECT
         c.id,
@@ -105,11 +105,29 @@ class ChatConversationModel extends MasterModel {
         ) AS other_participants
       FROM chat_conversations c
       JOIN chat_participants cp ON cp.conversation_id = c.id AND cp.user_id = $1
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM chat_participants cp_bad
+        JOIN users u_bad ON u_bad.id = cp_bad.user_id
+        WHERE cp_bad.conversation_id = c.id
+          AND u_bad.id != $1
+          AND NOT (
+            u_bad.site_id = $2
+            OR EXISTS (
+              SELECT 1 FROM user_site_access usa
+              WHERE usa.user_id = u_bad.id AND usa.site_id = $2
+            )
+            OR EXISTS (
+              SELECT 1 FROM supervisor_site_access ssa
+              WHERE ssa.supervisor_id = u_bad.id AND ssa.site_id = $2
+            )
+          )
+      )
       ORDER BY (
         SELECT MAX(m2.created_at) FROM chat_messages m2 WHERE m2.conversation_id = c.id
       ) DESC NULLS LAST, c.created_at DESC
     `;
-    const result = await pool.query(query, [userId]);
+    const result = await pool.query(query, [userId, siteId]);
     return result.rows;
   }
 
@@ -120,6 +138,41 @@ class ChatConversationModel extends MasterModel {
     const result = await pool.query(
       'SELECT 1 FROM chat_participants WHERE conversation_id = $1 AND user_id = $2',
       [conversationId, userId]
+    );
+    return result.rows.length > 0;
+  }
+
+  /**
+   * Verify that the requester participates and every other participant belongs
+   * to the requester's effective site. This also blocks legacy cross-site chats.
+   */
+  async isParticipantForSite(conversationId, userId, siteId, pool) {
+    if (!siteId) return false;
+    const result = await pool.query(
+      `SELECT 1
+       FROM chat_participants requester
+       WHERE requester.conversation_id = $1
+         AND requester.user_id = $2
+         AND NOT EXISTS (
+           SELECT 1
+           FROM chat_participants cp
+           JOIN users u ON u.id = cp.user_id
+           WHERE cp.conversation_id = requester.conversation_id
+             AND u.id != $2
+             AND NOT (
+               u.site_id = $3
+               OR EXISTS (
+                 SELECT 1 FROM user_site_access usa
+                 WHERE usa.user_id = u.id AND usa.site_id = $3
+               )
+               OR EXISTS (
+                 SELECT 1 FROM supervisor_site_access ssa
+                 WHERE ssa.supervisor_id = u.id AND ssa.site_id = $3
+               )
+             )
+         )
+       LIMIT 1`,
+      [conversationId, userId, siteId]
     );
     return result.rows.length > 0;
   }

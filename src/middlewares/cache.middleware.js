@@ -1,4 +1,5 @@
 import redisClient from '../config/redis.js';
+import { createHash } from 'crypto';
 
 // ─── L1: In-Process Memory Cache ─────────────────────────────────────────────
 // Sub-millisecond reads for hot keys before falling back to Redis.
@@ -16,8 +17,9 @@ class MemCache {
     }
 
     set(key, value, ttlSeconds) {
+        // Re-inserting moves a hot key to the end of the Map (simple LRU).
+        this._map.delete(key);
         if (this._map.size >= this._maxSize) {
-            // Evict the oldest (first) entry
             this._map.delete(this._map.keys().next().value);
         }
         this._map.set(key, { value, expiresAt: Date.now() + ttlSeconds * 1000 });
@@ -30,6 +32,8 @@ class MemCache {
             this._map.delete(key);
             return undefined;
         }
+        this._map.delete(key);
+        this._map.set(key, entry);
         return entry.value;
     }
 
@@ -44,6 +48,38 @@ class MemCache {
 }
 
 export const memCache = new MemCache(3000);
+const inFlightRequests = new Map();
+const COALESCE_WAIT_MS = 5_000;
+
+const normalizeTtl = (value) => Math.min(Math.max(Number(value) || 300, 1), 3_600);
+
+// Legacy controllers used cache:*:/api/... before site scoping was added to
+// keys. Expand those patterns explicitly so both L1 and Redis invalidations
+// remain correct for cache:{user}:{site}:{url}.
+export const normalizeCachePattern = (pattern) => {
+    const value = String(pattern || '');
+    return value.startsWith('cache:*:/api/')
+        ? value.replace('cache:*:/api/', 'cache:*:*:/api/')
+        : value;
+};
+
+const waitForFlight = (promise) => new Promise((resolve) => {
+    const timeout = setTimeout(() => resolve(null), COALESCE_WAIT_MS);
+    timeout.unref?.();
+    promise.then((value) => {
+        clearTimeout(timeout);
+        resolve(value);
+    });
+});
+
+const cacheUrlPart = (originalUrl) => {
+    const [pathname, rawQuery = ''] = String(originalUrl || '').split('?', 2);
+    if (!rawQuery) return pathname;
+    const params = new URLSearchParams(rawQuery);
+    params.sort();
+    const digest = createHash('sha256').update(params.toString()).digest('hex').slice(0, 20);
+    return `${pathname}:q:${digest}`;
+};
 
 // ─── Cache Middleware ────────────────────────────────────────────────────────
 /**
@@ -55,8 +91,9 @@ export const memCache = new MemCache(3000);
  * @param {number} ttl  TTL in seconds (default 300 = 5 min)
  */
 export const cacheMiddleware = (ttl = 300) => {
+    const resolvedTtl = normalizeTtl(ttl);
     // L1 TTL is capped at 120 s so L2 Redis remains authoritative
-    const l1Ttl = Math.min(ttl, 120);
+    const l1Ttl = Math.min(resolvedTtl, 120);
     const isRedisAvailable = () => redisClient?.isOpen && redisClient?.isReady;
 
     return async (req, res, next) => {
@@ -66,10 +103,12 @@ export const cacheMiddleware = (ttl = 300) => {
         if (!userId) return next();
 
         // Scope cache by effective site to prevent cross-site response bleed.
-        const requestedSiteId = req.header('x-site-id');
-        const effectiveSiteId = String(requestedSiteId || req.user?.site_id || 'no-site');
+        // authMiddleware has already resolved and authorized the effective
+        // site. Never key on the raw x-site-id header: an unauthorized header
+        // intentionally falls back to the user's real site.
+        const effectiveSiteId = String(req.user?.site_id || 'no-site');
 
-        const cacheKey = `cache:${userId}:${effectiveSiteId}:${req.originalUrl}`;
+        const cacheKey = `cache:${userId}:${effectiveSiteId}:${cacheUrlPart(req.originalUrl)}`;
 
         // Tier-1: memory hit
         const l1 = memCache.get(cacheKey);
@@ -93,21 +132,55 @@ export const cacheMiddleware = (ttl = 300) => {
             }
         }
 
+        // Prevent a burst of identical cold requests from all hitting the DB.
+        // Followers wait briefly for the first response, then fall through if
+        // the leader is slow or produced a non-cacheable response.
+        const existingFlight = inFlightRequests.get(cacheKey);
+        if (existingFlight) {
+            const flightResult = await waitForFlight(existingFlight);
+            if (flightResult?.cacheable) {
+                res.setHeader('X-Cache', 'COALESCED');
+                return res.json(flightResult.body);
+            }
+        }
+
+        let settleFlight;
+        let flightSettled = false;
+        const flight = new Promise((resolve) => { settleFlight = resolve; });
+        inFlightRequests.set(cacheKey, flight);
+
+        const settle = (result) => {
+            if (flightSettled) return;
+            flightSettled = true;
+            if (inFlightRequests.get(cacheKey) === flight) inFlightRequests.delete(cacheKey);
+            settleFlight(result);
+        };
+
+        res.once('finish', () => settle({ cacheable: false }));
+        res.once('close', () => settle({ cacheable: false }));
+
         // Cache miss → intercept res.json to populate both tiers
         const originalJson = res.json.bind(res);
         res.json = (body) => {
-            // Never cache error responses
-            if (body && body.success === false) {
+            const cacheable = res.statusCode >= 200
+                && res.statusCode < 300
+                && !(body && body.success === false)
+                && !String(res.getHeader('Cache-Control') || '').includes('no-store');
+
+            if (!cacheable) {
                 res.setHeader('X-Cache', 'SKIP');
+                settle({ cacheable: false });
                 return originalJson(body);
             }
             if (isRedisAvailable()) {
+                const serialized = JSON.stringify(body);
                 redisClient
-                    .setEx(cacheKey, ttl, JSON.stringify(body))
+                    .setEx(cacheKey, resolvedTtl, serialized)
                     .catch((err) => console.error('[Cache] Redis write error:', err.message));
             }
             memCache.set(cacheKey, body, l1Ttl);
             res.setHeader('X-Cache', 'MISS');
+            settle({ cacheable: true, body });
             return originalJson(body);
         };
 
@@ -124,19 +197,16 @@ export const cacheMiddleware = (ttl = 300) => {
  * @param {string} pattern  e.g. 'cache:*:/api/leads*'
  */
 export const bustCache = async (pattern) => {
+    const normalizedPattern = normalizeCachePattern(pattern);
     // Always clear L1 synchronously
-    memCache.deleteByPattern(pattern);
+    memCache.deleteByPattern(normalizedPattern);
     if (!(redisClient?.isOpen && redisClient?.isReady)) return;
-    // Clear L2 Redis via SCAN (cursor-safe, no KEYS block)
+    // Clear L2 Redis via the cursor-safe async iterator (never KEYS).
     try {
-        let cursor = 0;
-        do {
-            const result = await redisClient.scan(cursor, { MATCH: pattern, COUNT: 200 });
-            cursor = result.cursor;
-            if (result.keys.length > 0) {
-                await redisClient.del(result.keys);
-            }
-        } while (cursor !== 0);
+        for await (const batch of redisClient.scanIterator({ MATCH: normalizedPattern, COUNT: 200 })) {
+            const keys = Array.isArray(batch) ? batch : [batch];
+            if (keys.length > 0) await redisClient.del(keys);
+        }
     } catch (err) {
         console.error('[Cache] Redis bust error:', err.message);
     }
@@ -147,5 +217,14 @@ export const bustCache = async (pattern) => {
  * @param {...string} patterns
  */
 export const bustMany = (...patterns) => Promise.all(patterns.map(bustCache));
+
+/**
+ * Invalidate route families only for the mutated site while retaining cache
+ * hits for other sites. Paths should look like /api/leads or /api/dashboard.
+ */
+export const bustSiteCache = (siteId, ...paths) => {
+    if (!siteId) return bustMany(...paths.map((path) => `cache:*:*:${path}*`));
+    return bustMany(...paths.map((path) => `cache:*:${siteId}:${path}*`));
+};
 
 export default cacheMiddleware;

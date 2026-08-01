@@ -5,6 +5,54 @@ class LeadModel extends MasterModel {
         super('leads');
     }
 
+    async getDashboardSummary({ siteId, assignedTo = null }, pool) {
+        const params = [siteId];
+        const scopeClause = assignedTo ? 'AND l.assigned_to = $2' : '';
+        if (assignedTo) params.push(assignedTo);
+
+        const aggregateQuery = `
+            SELECT COALESCE(SUM(status_count), 0)::int AS total,
+                   COALESCE(JSONB_OBJECT_AGG(status, status_count), '{}'::jsonb) AS pipeline
+            FROM (
+                SELECT l.status, COUNT(*)::int AS status_count
+                FROM leads l
+                WHERE l.site_id = $1 ${scopeClause}
+                  AND l.status IS NOT NULL
+                GROUP BY l.status
+            ) grouped
+        `;
+        const recentQuery = `
+            SELECT l.*,
+                   u.name AS assigned_to_name,
+                   c.name AS created_by_name,
+                   o.name AS owner_name,
+                   COALESCE(cc.total_calls, 0)::int AS calls_dialed
+            FROM leads l
+            LEFT JOIN users u ON l.assigned_to = u.id
+            LEFT JOIN users c ON l.created_by = c.id
+            LEFT JOIN users o ON l.owner_id = o.id
+            LEFT JOIN LATERAL (
+                SELECT COUNT(*)::int AS total_calls
+                FROM calls cl
+                WHERE cl.site_id = l.site_id AND cl.lead_id = l.id
+            ) cc ON TRUE
+            WHERE l.site_id = $1 ${scopeClause}
+            ORDER BY l.created_at DESC
+            LIMIT 10
+        `;
+
+        const [aggregateResult, recentResult] = await Promise.all([
+            pool.query(aggregateQuery, params),
+            pool.query(recentQuery, params),
+        ]);
+        const aggregate = aggregateResult.rows[0] || {};
+        return {
+            total: Number(aggregate.total) || 0,
+            pipeline: aggregate.pipeline || {},
+            recent: recentResult.rows,
+        };
+    }
+
     async findBySiteAndTeam(siteId, teamId, pool) {
         let query = `SELECT * FROM ${this.tableName} WHERE site_id = $1`;
         let params = [siteId];
@@ -32,7 +80,11 @@ class LeadModel extends MasterModel {
 
     // Advanced search with pagination — ownership-aware
     async findWithDetails(filters, page, limit, pool) {
-        const offset = (page - 1) * limit;
+        const resolvedPage = Math.max(Number.parseInt(page, 10) || 1, 1);
+        const resolvedLimit = limit === -1
+            ? -1
+            : Math.min(Math.max(Number.parseInt(limit, 10) || 15, 1), 500);
+        const offset = resolvedLimit === -1 ? 0 : (resolvedPage - 1) * resolvedLimit;
         let whereClauses = [];
         let params = [];
         let paramIndex = 1;
@@ -89,14 +141,13 @@ class LeadModel extends MasterModel {
             SELECT COUNT(*) FROM ${this.tableName} l
             ${whereString}
         `;
-        const countResult = await pool.query(countQuery, params);
-        const total = parseInt(countResult.rows[0].count);
+        const countPromise = pool.query(countQuery, [...params]);
 
         // Get paginated data with user details
         let paginationClause = '';
-        if (limit !== -1) {
+        if (resolvedLimit !== -1) {
             paginationClause = `LIMIT $${paramIndex++} OFFSET $${paramIndex++}`;
-            params.push(limit, offset);
+            params.push(resolvedLimit, offset);
         }
 
         const dataQuery = `
@@ -120,15 +171,19 @@ class LeadModel extends MasterModel {
             ${paginationClause}
         `;
 
-        const dataResult = await pool.query(dataQuery, params);
+        const [countResult, dataResult] = await Promise.all([
+            countPromise,
+            pool.query(dataQuery, params),
+        ]);
+        const total = Number.parseInt(countResult.rows[0].count, 10);
 
         return {
             items: dataResult.rows,
             pagination: {
                 total,
-                page,
-                limit,
-                totalPages: Math.ceil(total / limit)
+                page: resolvedPage,
+                limit: resolvedLimit === -1 ? total : resolvedLimit,
+                totalPages: resolvedLimit === -1 ? 1 : Math.ceil(total / resolvedLimit)
             }
         };
     }

@@ -3,7 +3,7 @@ import leadModel from '../models/Lead.model.js';
 import userModel from '../models/User.model.js';
 import callModel from '../models/Call.model.js';
 import pool from '../config/db.js';
-import { bustCache } from '../middlewares/cache.middleware.js';
+import { bustSiteCache } from '../middlewares/cache.middleware.js';
 import { read as xlsxRead, utils as xlsxUtils } from 'xlsx';
 import fs from 'fs/promises';
 import { leadImportQueue } from '../utils/jobQueue.js';
@@ -17,11 +17,13 @@ const getSiteId = async (userId, reqUser) => {
     return user?.site_id;
 };
 
-const bustLeadCache = () => {
-    bustCache('cache:*:/api/leads*');
-    bustCache('cache:*:/api/site/leads*');
-    bustCache('cache:*:/api/followups*');
-};
+const bustLeadCache = (siteId) => bustSiteCache(
+    siteId,
+    '/api/leads',
+    '/api/site/leads',
+    '/api/followups',
+    '/api/dashboard',
+);
 
 // ────────────────────────────────────────────────────────────────────────────
 // Idempotent schema guard — makes sure the import-batch columns exist before
@@ -100,7 +102,7 @@ export const createLead = asyncHandler(async (req, res) => {
         );
     }
 
-    bustLeadCache();
+    bustLeadCache(siteId);
 
     res.status(201).json({
         success: true,
@@ -326,10 +328,10 @@ export const updateLead = asyncHandler(async (req, res) => {
             `UPDATE contacts SET ${setCols}, updated_at = NOW() WHERE converted_lead_id = $${vals.length}`,
             vals
         );
-        bustCache('cache:*:/api/contacts*');
+        bustSiteCache(siteId, '/api/contacts');
     }
 
-    bustLeadCache();
+    bustLeadCache(siteId);
 
     res.json({
         success: true,
@@ -351,7 +353,7 @@ export const deleteLead = asyncHandler(async (req, res) => {
     }
 
     await leadModel.delete(id, pool);
-    bustLeadCache();
+    bustLeadCache(siteId);
 
     res.json({ success: true, message: 'Lead deleted successfully' });
 });
@@ -393,7 +395,7 @@ export const assignLead = asyncHandler(async (req, res) => {
         [id, previousAssignedTo, assigned_to, req.user.id, reason || null]
     );
 
-    bustLeadCache();
+    bustLeadCache(siteId);
 
     res.json({
         success: true,
@@ -435,7 +437,7 @@ export const bulkAssignLeads = asyncHandler(async (req, res) => {
         assignedCount++;
     }
 
-    bustLeadCache();
+    bustLeadCache(siteId);
 
     res.json({
         success: true,
@@ -650,7 +652,7 @@ export const bulkUploadLeads = asyncHandler(async (req, res) => {
     );
 
     console.log(`[BulkLeads] Job ${jobId} enqueued — ${validatedLeads.length} rows. Queue depth: ${leadImportQueue.size}`);
-    bustLeadCache();
+    bustLeadCache(siteId);
 
     res.status(202).json({
         success: true,
@@ -754,6 +756,8 @@ async function processLeadBulkJob(jobId, leads, siteId, createdByUserId) {
          WHERE id = $1`,
         [jobId]
     );
+
+    bustLeadCache(siteId);
 
     console.log(`[BulkLeads] Job ${jobId} done — ${processedCount} inserted, ${failedCount} failed`);
 }
@@ -890,7 +894,7 @@ export const renameImportBatch = asyncHandler(async (req, res) => {
         return res.status(404).json({ success: false, message: 'Import batch not found' });
     }
 
-    bustLeadCache();
+    bustLeadCache(siteId);
     res.json({ success: true, id, label });
 });
 
@@ -1046,8 +1050,8 @@ export const shiftLeadsToCall = asyncHandler(async (req, res) => {
 
         await client.query('COMMIT');
 
-        bustLeadCache();
-        bustCache('cache:*:/api/calls*');
+        bustLeadCache(siteId);
+        bustSiteCache(siteId, '/api/calls');
 
         res.json({
             success: true,

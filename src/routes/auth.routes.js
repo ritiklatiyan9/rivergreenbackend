@@ -17,10 +17,29 @@ import {
 import { getMySidebarModules } from '../controllers/sidebarPermission.controller.js';
 import authMiddleware from '../middlewares/auth.middleware.js';
 import upload from '../middlewares/multer.middleware.js';
+import { rateLimit } from '../middlewares/rateLimit.middleware.js';
 
-router.post('/register-owner', registerOwner);
-router.post('/login', login);
-router.post('/refresh', refresh);
+const authIdentity = (req) => `${req.ip}:${String(req.body?.email || '').trim().toLowerCase()}`;
+const loginLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: 10,
+  keyPrefix: 'login',
+  keyGenerator: authIdentity,
+});
+const refreshLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: 60,
+  keyPrefix: 'refresh',
+});
+const ownerRegistrationLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  keyPrefix: 'owner-registration',
+});
+
+router.post('/register-owner', ownerRegistrationLimiter, registerOwner);
+router.post('/login', loginLimiter, login);
+router.post('/refresh', refreshLimiter, refresh);
 router.post('/logout', authMiddleware, logout);
 router.get('/me', authMiddleware, getMe);
 router.get('/sidebar-modules', authMiddleware, getMySidebarModules);

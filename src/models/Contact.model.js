@@ -6,6 +6,8 @@ class Contact extends MasterModel {
     }
 
     async findWithDetails(filters, page, limit, pool) {
+        page = Math.max(Number.parseInt(page, 10) || 1, 1);
+        limit = limit <= 0 ? -1 : Math.min(Math.max(Number.parseInt(limit, 10) || 25, 1), 500);
         const whereClauses = ['c.site_id = $1'];
         const params = [filters.site_id];
         let paramIndex = 2;
@@ -37,46 +39,47 @@ class Contact extends MasterModel {
 
         const whereString = 'WHERE ' + whereClauses.join(' AND ');
 
-        const countResult = await pool.query(
+        const countPromise = pool.query(
             `SELECT COUNT(*) FROM ${this.tableName} c ${whereString}`,
-            params
+            [...params]
         );
-        const total = parseInt(countResult.rows[0].count);
 
         const baseQuery = `
             SELECT c.*, u.name as created_by_name,
                      COALESCE(cc.total_calls, 0)::int AS calls_dialed
             FROM ${this.tableName} c
             LEFT JOIN users u ON c.created_by = u.id
-            LEFT JOIN (
-                SELECT lead_id, COUNT(*)::int AS total_calls
-                FROM calls
-                GROUP BY lead_id
-            ) cc ON c.converted_lead_id = cc.lead_id
+            LEFT JOIN LATERAL (
+                SELECT COUNT(*)::int AS total_calls
+                FROM calls cl
+                WHERE cl.site_id = c.site_id
+                  AND cl.lead_id = c.converted_lead_id
+            ) cc ON c.converted_lead_id IS NOT NULL
             ${whereString}
             ORDER BY c.created_at DESC
         `;
 
-        let dataResult;
+        let dataPromise;
         let resolvedPage = page;
         let resolvedLimit = limit;
-        let totalPages;
 
         if (limit <= 0) {
-            dataResult = await pool.query(baseQuery, params);
+            dataPromise = pool.query(baseQuery, params);
             resolvedPage = 1;
-            resolvedLimit = total;
-            totalPages = 1;
         } else {
             const offset = (page - 1) * limit;
             const pagedParams = [...params, limit, offset];
-            dataResult = await pool.query(
+            dataPromise = pool.query(
                 `${baseQuery}
                  LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
                 pagedParams
             );
-            totalPages = Math.ceil(total / limit);
         }
+
+        const [countResult, dataResult] = await Promise.all([countPromise, dataPromise]);
+        const total = Number.parseInt(countResult.rows[0].count, 10);
+        if (limit <= 0) resolvedLimit = total;
+        const totalPages = limit <= 0 ? 1 : Math.ceil(total / limit);
 
         return {
             items: dataResult.rows,

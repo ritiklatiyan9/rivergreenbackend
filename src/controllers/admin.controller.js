@@ -11,12 +11,66 @@ const sanitizeUser = (user) => {
   return safe;
 };
 
+const sameId = (left, right) => Boolean(left && right && String(left) === String(right));
+
+export const actorCanManageSite = (actor, site) => {
+  if (!actor || !site) return false;
+  if (actor.role === 'OWNER') return sameId(site.created_by, actor.id);
+  if (actor.role === 'ADMIN') return sameId(site.id, actor.site_id);
+  return false;
+};
+
+const actorCanManageUser = async (actor, user) => {
+  if (!actor || !user || user.role === 'OWNER' || !user.site_id) return false;
+  if (actor.role === 'ADMIN') return sameId(user.site_id, actor.site_id);
+  if (actor.role !== 'OWNER') return false;
+
+  const result = await pool.query(
+    'SELECT 1 FROM sites WHERE id = $1 AND created_by = $2 LIMIT 1',
+    [user.site_id, actor.id],
+  );
+  return result.rowCount > 0;
+};
+
+const getManagedSitesWithCounts = async (actor) => {
+  if (actor.role === 'OWNER') return siteModel.findWithAdminCount(actor.id, pool);
+  if (actor.role !== 'ADMIN' || !actor.site_id) return [];
+
+  const result = await pool.query(
+    `SELECT s.*,
+       (SELECT COUNT(*) FROM users u WHERE u.site_id = s.id AND u.role = 'ADMIN') AS admin_count,
+       (SELECT COUNT(*) FROM users u WHERE u.site_id = s.id) AS total_users
+     FROM sites s
+     WHERE s.id = $1
+     ORDER BY s.created_at DESC`,
+    [actor.site_id],
+  );
+  return result.rows;
+};
+
+const getManagedAdminCount = async (actor) => {
+  const result = await pool.query(
+    `SELECT COUNT(*)::int AS count
+     FROM users u
+     JOIN sites s ON s.id = u.site_id
+     WHERE u.role = 'ADMIN'
+       AND (($2 = 'OWNER' AND s.created_by = $1)
+         OR ($2 = 'ADMIN' AND s.id = $3::uuid))`,
+    [actor.id, actor.role, actor.site_id || null],
+  );
+  return result.rows[0]?.count || 0;
+};
+
 // ============================================================
 // SITE MANAGEMENT (Owner only)
 // ============================================================
 
 // Create a new site
 export const createSite = asyncHandler(async (req, res) => {
+  if (req.user.role !== 'OWNER') {
+    return res.status(403).json({ success: false, message: 'Only an owner can create a site' });
+  }
+
   const { name, address, city, state, description } = req.body;
   if (!name) {
     return res.status(400).json({ success: false, message: 'Site name is required' });
@@ -38,20 +92,7 @@ export const createSite = asyncHandler(async (req, res) => {
 
 // List all sites for owner
 export const listSites = asyncHandler(async (req, res) => {
-  let sites;
-  if (req.user.role === 'OWNER') {
-    sites = await siteModel.findWithAdminCount(req.user.id, pool);
-  } else {
-    const query = `
-      SELECT s.*,
-        (SELECT COUNT(*) FROM users u WHERE u.site_id = s.id AND u.role = 'ADMIN') as admin_count,
-        (SELECT COUNT(*) FROM users u WHERE u.site_id = s.id) as total_users
-      FROM sites s
-      ORDER BY s.created_at DESC
-    `;
-    const result = await pool.query(query);
-    sites = result.rows;
-  }
+  const sites = await getManagedSitesWithCounts(req.user);
   res.json({ success: true, sites });
 });
 
@@ -64,7 +105,7 @@ export const updateSite = asyncHandler(async (req, res) => {
   if (!site) {
     return res.status(404).json({ success: false, message: 'Site not found' });
   }
-  if (req.user.role === 'OWNER' && site.created_by && site.created_by !== req.user.id) {
+  if (!actorCanManageSite(req.user, site)) {
     return res.status(403).json({ success: false, message: 'You do not have access to this site' });
   }
 
@@ -93,7 +134,7 @@ export const deleteSite = asyncHandler(async (req, res) => {
   if (!site) {
     return res.status(404).json({ success: false, message: 'Site not found' });
   }
-  if (req.user.role === 'OWNER' && site.created_by && site.created_by !== req.user.id) {
+  if (!actorCanManageSite(req.user, site)) {
     return res.status(403).json({ success: false, message: 'You do not have access to this site' });
   }
 
@@ -113,7 +154,7 @@ export const deleteSite = asyncHandler(async (req, res) => {
 
 // Get site count
 export const getSiteCount = asyncHandler(async (req, res) => {
-  const count = await siteModel.countByOwner(req.user.id, pool);
+  const count = (await getManagedSitesWithCounts(req.user)).length;
   res.json({ success: true, count });
 });
 
@@ -133,7 +174,7 @@ export const createAdmin = asyncHandler(async (req, res) => {
   if (!site) {
     return res.status(404).json({ success: false, message: 'Site not found' });
   }
-  if (req.user.role === 'OWNER' && site.created_by && site.created_by !== req.user.id) {
+  if (!actorCanManageSite(req.user, site)) {
     return res.status(403).json({ success: false, message: 'You do not have access to this site' });
   }
 
@@ -163,23 +204,20 @@ export const createAdmin = asyncHandler(async (req, res) => {
 
 // List all Admins (Owner only)
 export const listAdmins = asyncHandler(async (req, res) => {
-  let admins = await userModel.findAllByRole('ADMIN', pool);
-  if (req.user.role === 'ADMIN') {
-    admins = admins.filter((admin) => String(admin.site_id || '') === String(req.user.site_id || ''));
-  }
+  const result = await pool.query(
+    `SELECT u.id, u.name, u.email, u.phone, u.profile_photo, u.role,
+            u.sponsor_code, u.site_id, u.is_active, u.created_at, u.updated_at,
+            s.name AS site_name
+     FROM users u
+     JOIN sites s ON s.id = u.site_id
+     WHERE u.role = 'ADMIN'
+       AND (($2 = 'OWNER' AND s.created_by = $1)
+         OR ($2 = 'ADMIN' AND s.id = $3::uuid))
+     ORDER BY u.created_at DESC`,
+    [req.user.id, req.user.role, req.user.site_id || null],
+  );
 
-  // Enrich with site name
-  const enriched = [];
-  for (const admin of admins) {
-    let siteName = null;
-    if (admin.site_id) {
-      const site = await siteModel.findById(admin.site_id, pool);
-      siteName = site?.name || null;
-    }
-    enriched.push({ ...admin, site_name: siteName });
-  }
-
-  res.json({ success: true, admins: enriched });
+  res.json({ success: true, admins: result.rows });
 });
 
 // Update Admin (Owner only)
@@ -192,7 +230,7 @@ export const updateAdmin = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: 'Admin not found' });
   }
 
-  if (req.user.role === 'ADMIN' && String(admin.site_id || '') !== String(req.user.site_id || '')) {
+  if (!(await actorCanManageUser(req.user, admin))) {
     return res.status(403).json({ success: false, message: 'You do not have access to this admin' });
   }
 
@@ -213,11 +251,8 @@ export const updateAdmin = asyncHandler(async (req, res) => {
     if (!site) {
       return res.status(404).json({ success: false, message: 'Site not found' });
     }
-    if (req.user.role === 'OWNER' && site.created_by && site.created_by !== req.user.id) {
+    if (!actorCanManageSite(req.user, site)) {
       return res.status(403).json({ success: false, message: 'You do not have access to this site' });
-    }
-    if (req.user.role === 'ADMIN' && String(site.id) !== String(req.user.site_id || '')) {
-      return res.status(403).json({ success: false, message: 'You can only assign your current site' });
     }
     updateData.site_id = site_id;
   }
@@ -240,7 +275,7 @@ export const deleteAdmin = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: 'Admin not found' });
   }
 
-  if (req.user.role === 'ADMIN' && String(admin.site_id || '') !== String(req.user.site_id || '')) {
+  if (!(await actorCanManageUser(req.user, admin))) {
     return res.status(403).json({ success: false, message: 'You do not have access to this admin' });
   }
 
@@ -251,15 +286,17 @@ export const deleteAdmin = asyncHandler(async (req, res) => {
 
 // Get admin count
 export const getAdminCount = asyncHandler(async (req, res) => {
-  const count = await userModel.countByRole('ADMIN', pool);
+  const count = await getManagedAdminCount(req.user);
   res.json({ success: true, count });
 });
 
 // Owner dashboard stats
 export const getOwnerStats = asyncHandler(async (req, res) => {
-  const siteCount = await siteModel.countByOwner(req.user.id, pool);
-  const adminCount = await userModel.countByRole('ADMIN', pool);
-  const sites = await siteModel.findWithAdminCount(req.user.id, pool);
+  const [sites, adminCount] = await Promise.all([
+    getManagedSitesWithCounts(req.user),
+    getManagedAdminCount(req.user),
+  ]);
+  const siteCount = sites.length;
 
   res.json({
     success: true,
@@ -280,6 +317,12 @@ export const getAllUsersForAccess = asyncHandler(async (req, res) => {
   await ensureUserSiteAccessTable(pool);
 
   const query = `
+    WITH authorized_sites AS (
+      SELECT s.id
+      FROM sites s
+      WHERE ($2 = 'OWNER' AND s.created_by = $1)
+         OR ($2 = 'ADMIN' AND s.id = $3::uuid)
+    )
     SELECT 
       u.id, u.name, u.email, u.role, u.site_id, u.is_active, u.created_at,
       s.name as site_name,
@@ -290,20 +333,23 @@ export const getAllUsersForAccess = asyncHandler(async (req, res) => {
         '[]'::json
       ) AS assigned_sites,
       COALESCE(
-        ARRAY_AGG(DISTINCT usa.site_id) FILTER (WHERE usa.site_id IS NOT NULL),
+        ARRAY_AGG(DISTINCT assigned_s.id) FILTER (WHERE assigned_s.id IS NOT NULL),
         ARRAY[]::uuid[]
       ) AS assigned_site_ids,
-      (SELECT COUNT(*)::int FROM leads WHERE assigned_to = u.id) as lead_count,
-      (SELECT COUNT(*)::int FROM calls WHERE assigned_to = u.id) as call_count
+      (SELECT COUNT(*)::int FROM leads l
+       WHERE l.assigned_to = u.id AND l.site_id IN (SELECT id FROM authorized_sites)) AS lead_count,
+      (SELECT COUNT(*)::int FROM calls c
+       WHERE c.assigned_to = u.id AND c.site_id IN (SELECT id FROM authorized_sites)) AS call_count
     FROM users u
     LEFT JOIN sites s ON u.site_id = s.id
-    LEFT JOIN user_site_access usa ON usa.user_id = u.id
+    LEFT JOIN user_site_access usa
+      ON usa.user_id = u.id AND usa.site_id IN (SELECT id FROM authorized_sites)
     LEFT JOIN sites assigned_s ON assigned_s.id = usa.site_id
-    WHERE u.role != 'OWNER'
+    WHERE u.role != 'OWNER' AND u.site_id IN (SELECT id FROM authorized_sites)
     GROUP BY u.id, u.name, u.email, u.role, u.site_id, u.is_active, u.created_at, s.name
     ORDER BY u.created_at DESC
   `;
-  const result = await pool.query(query);
+  const result = await pool.query(query, [req.user.id, req.user.role, req.user.site_id || null]);
   res.json({ success: true, users: result.rows });
 });
 
@@ -326,8 +372,7 @@ export const updateUserAccountAccess = asyncHandler(async (req, res) => {
     return res.status(403).json({ success: false, message: 'Cannot disable owner account' });
   }
 
-  // Admin can only manage users in their site
-  if (req.user.role === 'ADMIN' && String(user.site_id || '') !== String(req.user.site_id || '')) {
+  if (!(await actorCanManageUser(req.user, user))) {
     return res.status(403).json({ success: false, message: 'You do not have access to this user' });
   }
 
@@ -368,6 +413,10 @@ export const updateUserSiteAccess = asyncHandler(async (req, res) => {
     return res.status(403).json({ success: false, message: 'Cannot change owner site assignment' });
   }
 
+  if (!(await actorCanManageUser(req.user, user))) {
+    return res.status(403).json({ success: false, message: 'You do not have access to this user' });
+  }
+
   const incomingSiteIds = Array.isArray(site_ids)
     ? site_ids
     : (site_id ? [site_id] : []);
@@ -376,11 +425,16 @@ export const updateUserSiteAccess = asyncHandler(async (req, res) => {
     .filter(Boolean)
     .map((v) => String(v)))];
 
-  // Validate all requested sites exist
-  for (const nextSiteId of normalizedSiteIds) {
-    const site = await siteModel.findById(nextSiteId, pool);
-    if (!site) {
+  if (normalizedSiteIds.length > 0) {
+    const sitesResult = await pool.query(
+      'SELECT id, created_by FROM sites WHERE id = ANY($1::uuid[])',
+      [normalizedSiteIds],
+    );
+    if (sitesResult.rowCount !== normalizedSiteIds.length) {
       return res.status(404).json({ success: false, message: 'Site not found' });
+    }
+    if (sitesResult.rows.some((site) => !actorCanManageSite(req.user, site))) {
+      return res.status(403).json({ success: false, message: 'You do not have access to one or more sites' });
     }
   }
 
@@ -416,8 +470,7 @@ export const resetUserPassword = asyncHandler(async (req, res) => {
     return res.status(403).json({ success: false, message: 'Cannot reset owner password' });
   }
 
-  // Admin can only reset passwords for users in their site
-  if (req.user.role === 'ADMIN' && String(user.site_id || '') !== String(req.user.site_id || '')) {
+  if (!(await actorCanManageUser(req.user, user))) {
     return res.status(403).json({ success: false, message: 'You do not have access to this user' });
   }
 

@@ -16,6 +16,7 @@ import {
   getPermissions,
   updatePermission,
   getMyPermissions,
+  authorizeConversationUpload,
 } from '../controllers/chat.controller.js';
 
 const router = express.Router();
@@ -38,7 +39,7 @@ router.delete('/conversations/:id', deleteConversation);
 // Messages
 router.get('/conversations/:id/messages', getMessages);
 router.post('/conversations/:id/messages', sendMessage);
-router.post('/conversations/:id/upload', chatUpload.single('file'), sendFileMessage);
+router.post('/conversations/:id/upload', authorizeConversationUpload, chatUpload.single('file'), sendFileMessage);
 
 // Message actions
 router.put('/messages/:id', editMessage);

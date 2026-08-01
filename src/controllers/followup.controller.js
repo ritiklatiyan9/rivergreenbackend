@@ -2,7 +2,32 @@ import asyncHandler from '../utils/asyncHandler.js';
 import followupModel from '../models/Followup.model.js';
 import userModel from '../models/User.model.js';
 import pool from '../config/db.js';
-import { bustCache } from '../middlewares/cache.middleware.js';
+import { bustSiteCache } from '../middlewares/cache.middleware.js';
+
+const bustFollowupCache = (siteId) => bustSiteCache(
+    siteId,
+    '/api/followups',
+    '/api/dashboard',
+);
+
+const PRIVILEGED_ROLES = new Set(['ADMIN', 'OWNER', 'SUPERVISOR']);
+
+const canMutateFollowup = async (followup, user) => {
+    if (!followup || followup.site_id !== user.site_id) return false;
+    if (PRIVILEGED_ROLES.has(user.role)) return true;
+    if (user.role === 'AGENT') return followup.assigned_to === user.id;
+    if (user.role !== 'TEAM_HEAD') return false;
+    if (followup.assigned_to === user.id) return true;
+    if (!user.team_id || !followup.assigned_to) return false;
+
+    const member = await pool.query(
+        `SELECT 1 FROM users
+         WHERE id = $1 AND team_id = $2 AND site_id = $3 AND is_active = TRUE
+         LIMIT 1`,
+        [followup.assigned_to, user.team_id, user.site_id],
+    );
+    return Boolean(member.rows[0]);
+};
 
 // ============================================================
 // Helper: scope filters based on role
@@ -34,6 +59,19 @@ export const createFollowup = asyncHandler(async (req, res) => {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
 
+    const leadResult = await pool.query(
+        'SELECT id, owner_id, assigned_to FROM leads WHERE id = $1 AND site_id = $2 LIMIT 1',
+        [lead_id, req.user.site_id],
+    );
+    const lead = leadResult.rows[0];
+    if (!lead) {
+        return res.status(404).json({ success: false, message: 'Lead not found' });
+    }
+    if ((req.user.role === 'AGENT' || req.user.role === 'TEAM_HEAD')
+        && lead.owner_id !== req.user.id && lead.assigned_to !== req.user.id) {
+        return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
     const scheduledAt = scheduled_time
         ? new Date(`${scheduled_date}T${scheduled_time}`)
         : new Date(`${scheduled_date}T09:00:00`);
@@ -49,7 +87,7 @@ export const createFollowup = asyncHandler(async (req, res) => {
         notes: notes || null,
     }, pool);
 
-    bustCache('cache:*:/api/followups*');
+    bustFollowupCache(req.user.site_id);
     res.status(201).json({ success: true, followup });
 });
 
@@ -146,11 +184,11 @@ export const getFollowupCounts = asyncHandler(async (req, res) => {
 export const updateFollowup = asyncHandler(async (req, res) => {
     const { id } = req.params;
     const existing = await followupModel.findById(id, pool);
-    if (!existing) {
+    if (!existing || existing.site_id !== req.user.site_id) {
         return res.status(404).json({ success: false, message: 'Followup not found' });
     }
 
-    if (req.user.role === 'AGENT' && existing.assigned_to !== req.user.id) {
+    if (!(await canMutateFollowup(existing, req.user))) {
         return res.status(403).json({ success: false, message: 'Access denied' });
     }
 
@@ -175,7 +213,7 @@ export const updateFollowup = asyncHandler(async (req, res) => {
     }
 
     const updated = await followupModel.update(id, updateData, pool);
-    bustCache('cache:*:/api/followups*');
+    bustFollowupCache(req.user.site_id);
     res.json({ success: true, followup: updated });
 });
 
@@ -191,8 +229,12 @@ export const snoozeFollowup = asyncHandler(async (req, res) => {
     }
 
     const existing = await followupModel.findById(id, pool);
-    if (!existing) {
+    if (!existing || existing.site_id !== req.user.site_id) {
         return res.status(404).json({ success: false, message: 'Followup not found' });
+    }
+
+    if (!(await canMutateFollowup(existing, req.user))) {
+        return res.status(403).json({ success: false, message: 'Access denied' });
     }
 
     const updated = await followupModel.update(id, {
@@ -201,7 +243,7 @@ export const snoozeFollowup = asyncHandler(async (req, res) => {
         scheduled_at: new Date(snooze_until).toISOString(),
     }, pool);
 
-    bustCache('cache:*:/api/followups*');
+    bustFollowupCache(req.user.site_id);
     res.json({ success: true, followup: updated });
 });
 
@@ -213,8 +255,11 @@ export const escalateFollowup = asyncHandler(async (req, res) => {
     const { reason } = req.body;
 
     const existing = await followupModel.findById(id, pool);
-    if (!existing) {
+    if (!existing || existing.site_id !== req.user.site_id) {
         return res.status(404).json({ success: false, message: 'Followup not found' });
+    }
+    if (!(await canMutateFollowup(existing, req.user))) {
+        return res.status(403).json({ success: false, message: 'Access denied' });
     }
 
     // Find the team head for escalation
@@ -235,7 +280,7 @@ export const escalateFollowup = asyncHandler(async (req, res) => {
         escalation_reason: reason || 'Not updated within scheduled time',
     }, pool);
 
-    bustCache('cache:*:/api/followups*');
+    bustFollowupCache(req.user.site_id);
     res.json({ success: true, followup: updated });
 });
 

@@ -3,6 +3,7 @@ const router = express.Router();
 
 import {
   getDashboardStats,
+  getAgentOverview,
   getConversionFunnel,
   getTeamPerformance,
   getAgentMatterLeads,
@@ -13,6 +14,9 @@ import { cacheMiddleware } from '../middlewares/cache.middleware.js';
 
 // All dashboard routes require authentication
 router.use(authMiddleware);
+
+// Mobile dashboard hot path: one compact, role-scoped response.
+router.get('/agent-overview', cacheMiddleware(30), getAgentOverview);
 
 // Main dashboard stats (consolidated)
 router.get('/stats', cacheMiddleware(60), getDashboardStats);

@@ -6,8 +6,12 @@
  */
 const httpCacheHeaders = (maxAge = 30) => {
     return (req, res, next) => {
-        if (req.method === 'GET') {
-            res.set('Cache-Control', `private, max-age=${maxAge}`);
+        if (req.method === 'GET' || req.method === 'HEAD') {
+            // Authenticated API data can change immediately after a mutation.
+            // Keep browser storage revalidation-only; the server L1/Redis cache
+            // remains the authoritative, explicitly invalidated fast path.
+            res.set('Cache-Control', 'private, no-cache, must-revalidate');
+            res.set('Vary', 'Authorization, x-site-id, Origin');
         } else {
             res.set('Cache-Control', 'no-store');
         }

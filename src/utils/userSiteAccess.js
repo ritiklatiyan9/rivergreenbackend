@@ -1,25 +1,34 @@
-let _tableEnsured = false;
+let _ensurePromise = null;
 
 export const ensureUserSiteAccessTable = async (pool) => {
-  if (_tableEnsured) return;
+  if (_ensurePromise) return _ensurePromise;
 
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS user_site_access (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      site_id UUID NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
-      created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(user_id, site_id)
-    )
-  `);
+  _ensurePromise = (async () => {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS user_site_access (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        site_id UUID NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, site_id)
+      )
+    `);
 
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_user_site_access_user_id ON user_site_access(user_id)');
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_user_site_access_site_id ON user_site_access(site_id)');
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_user_site_access_user_id ON user_site_access(user_id)');
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_user_site_access_site_id ON user_site_access(site_id)');
+  })().catch((error) => {
+    _ensurePromise = null;
+    throw error;
+  });
 
-  _tableEnsured = true;
+  return _ensurePromise;
 };
 
-export const getUserAssignedSiteIds = async (userId, pool, { includePrimary = true } = {}) => {
+export const getUserAssignedSiteIds = async (
+  userId,
+  pool,
+  { includePrimary = true, primarySiteId = undefined } = {},
+) => {
   await ensureUserSiteAccessTable(pool);
 
   const rows = await pool.query(
@@ -30,10 +39,14 @@ export const getUserAssignedSiteIds = async (userId, pool, { includePrimary = tr
   const ids = rows.rows.map((r) => String(r.site_id));
 
   if (includePrimary) {
-    const userRow = await pool.query('SELECT site_id FROM users WHERE id = $1 LIMIT 1', [userId]);
-    const primarySiteId = userRow.rows[0]?.site_id ? String(userRow.rows[0].site_id) : null;
-    if (primarySiteId && !ids.includes(primarySiteId)) {
-      ids.unshift(primarySiteId);
+    let resolvedPrimarySiteId = primarySiteId;
+    if (resolvedPrimarySiteId === undefined) {
+      const userRow = await pool.query('SELECT site_id FROM users WHERE id = $1 LIMIT 1', [userId]);
+      resolvedPrimarySiteId = userRow.rows[0]?.site_id || null;
+    }
+    const normalizedPrimarySiteId = resolvedPrimarySiteId ? String(resolvedPrimarySiteId) : null;
+    if (normalizedPrimarySiteId && !ids.includes(normalizedPrimarySiteId)) {
+      ids.unshift(normalizedPrimarySiteId);
     }
   }
 
@@ -53,10 +66,12 @@ export const setUserAssignedSites = async (userId, siteIds, pool) => {
 
     await client.query('DELETE FROM user_site_access WHERE user_id = $1', [userId]);
 
-    for (const siteId of normalized) {
+    if (normalized.length > 0) {
       await client.query(
-        'INSERT INTO user_site_access (user_id, site_id) VALUES ($1, $2) ON CONFLICT (user_id, site_id) DO NOTHING',
-        [userId, siteId],
+        `INSERT INTO user_site_access (user_id, site_id)
+         SELECT $1, selected.site_id FROM UNNEST($2::uuid[]) AS selected(site_id)
+         ON CONFLICT (user_id, site_id) DO NOTHING`,
+        [userId, normalized],
       );
     }
 

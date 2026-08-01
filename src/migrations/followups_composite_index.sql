@@ -1,3 +1,4 @@
+-- migrate:split-statements
 -- Composite index for the most common query pattern on followups:
 -- Agent scope: site_id + assigned_to + status + scheduled_at
 -- This covers getScheduledFollowups (AGENT) and getMissedFollowups with ORDER BY scheduled_at.

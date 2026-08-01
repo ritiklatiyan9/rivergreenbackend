@@ -7,6 +7,7 @@ import { uploadSingle } from '../utils/upload.js';
 import { ensureUserSiteAccessTable, getUserAssignedSiteIds } from '../utils/userSiteAccess.js';
 import fcmService from '../services/fcm.service.js';
 import { bustCache } from '../middlewares/cache.middleware.js';
+import { timingSafeEqual } from 'crypto';
 
 const REFRESH_COOKIE_OPTIONS = {
   httpOnly: true,
@@ -34,12 +35,19 @@ const readRefreshToken = (req) => {
   return req.cookies?.refreshToken || req.body?.refreshToken || headerToken || null;
 };
 
+const safeSecretMatches = (provided, expected) => {
+  if (!provided || !expected) return false;
+  const providedBuffer = Buffer.from(String(provided));
+  const expectedBuffer = Buffer.from(String(expected));
+  return providedBuffer.length === expectedBuffer.length
+    && timingSafeEqual(providedBuffer, expectedBuffer);
+};
+
 const getAccessibleSitesForUser = async (user) => {
   if (!user) return [];
 
-  if (user.role === 'OWNER' || user.role === 'ADMIN') {
-    const sites = await siteModel.findAll(pool);
-    return sites.filter((site) => site.is_active !== false);
+  if (user.role === 'OWNER') {
+    return siteModel.findActiveByOwner(user.id, pool);
   }
 
   // Supervisor: pull from supervisor_site_access table
@@ -64,7 +72,10 @@ const getAccessibleSitesForUser = async (user) => {
   }
 
   await ensureUserSiteAccessTable(pool);
-  const assignedSiteIds = await getUserAssignedSiteIds(user.id, pool, { includePrimary: true });
+  const assignedSiteIds = await getUserAssignedSiteIds(user.id, pool, {
+    includePrimary: true,
+    primarySiteId: user.site_id,
+  });
   if (!assignedSiteIds.length) return [];
 
   const sitesResult = await pool.query(
@@ -81,8 +92,15 @@ const getAccessibleSitesForUser = async (user) => {
 // Register owner via Postman
 export const registerOwner = asyncHandler(async (req, res) => {
   const { name, email, password } = req.body;
+  if (process.env.NODE_ENV === 'production'
+      && !safeSecretMatches(req.header('x-owner-registration-secret'), process.env.OWNER_REGISTRATION_SECRET)) {
+    return res.status(403).json({ success: false, message: 'Owner registration is disabled' });
+  }
   if (!name || !email || !password) {
     return res.status(400).json({ success: false, message: 'Name, email and password are required' });
+  }
+  if (String(password).length < 10) {
+    return res.status(400).json({ success: false, message: 'Password must be at least 10 characters' });
   }
 
   const existing = await userModel.findByEmail(email, pool);

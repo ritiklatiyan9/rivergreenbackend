@@ -1,14 +1,15 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import chatService from '../services/chat.service.js';
 import fcmService from '../services/fcm.service.js';
+import { cleanupFile } from '../middlewares/multer.middleware.js';
 
 // Fire-and-forget FCM push for a newly-created chat message. Runs after the
 // HTTP response so it never blocks the sender, and never throws — chat
 // delivery must keep working even if FCM is unreachable.
-const pushChatNotification = (conversationId, senderId, msg) => {
+const pushChatNotification = (conversationId, senderId, siteId, msg) => {
   setImmediate(async () => {
     try {
-      const participants = await chatService.getConversationParticipants(conversationId);
+      const participants = await chatService.getConversationParticipants(conversationId, siteId, senderId);
       const recipientIds = participants
         .map((p) => p.id)
         .filter((id) => id && id !== senderId);
@@ -47,7 +48,7 @@ const pushChatNotification = (conversationId, senderId, msg) => {
  * Get all conversations for the authenticated user
  */
 export const getConversations = asyncHandler(async (req, res) => {
-  const conversations = await chatService.getUserConversations(req.user.id);
+  const conversations = await chatService.getUserConversations(req.user.id, req.user.site_id);
   res.json({ success: true, conversations });
 });
 
@@ -63,8 +64,12 @@ export const startConversation = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'Cannot start conversation with yourself' });
   }
 
-  const conversation = await chatService.getOrCreateConversation(req.user.id, userId);
-  res.json({ success: true, conversation });
+  try {
+    const conversation = await chatService.getOrCreateConversation(req.user.id, userId, req.user.site_id);
+    return res.json({ success: true, conversation });
+  } catch (err) {
+    return res.status(err.statusCode || 400).json({ success: false, message: err.message || 'Failed to start conversation' });
+  }
 });
 
 /**
@@ -80,10 +85,10 @@ export const createGroupConversation = asyncHandler(async (req, res) => {
   }
 
   try {
-    const conversation = await chatService.createGroupConversation(req.user.id, name, participantIds);
+    const conversation = await chatService.createGroupConversation(req.user.id, name, participantIds, req.user.site_id);
     return res.status(201).json({ success: true, conversation });
   } catch (err) {
-    return res.status(400).json({ success: false, message: err.message || 'Failed to create group' });
+    return res.status(err.statusCode || 400).json({ success: false, message: err.message || 'Failed to create group' });
   }
 });
 
@@ -94,11 +99,18 @@ export const createGroupConversation = asyncHandler(async (req, res) => {
  */
 export const getMessages = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const limit = parseInt(req.query.limit) || 30;
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 30));
   const before = req.query.before || null;
 
-  const messages = await chatService.getMessages(id, req.user.id, { limit, before });
+  const messages = await chatService.getMessages(id, req.user.id, req.user.site_id, { limit, before });
   res.json({ success: true, messages });
+});
+
+// Runs before Multer so an unauthorized conversation cannot create a temporary
+// upload on disk. The service verifies again before persisting the message.
+export const authorizeConversationUpload = asyncHandler(async (req, res, next) => {
+  await chatService.assertConversationAccess(req.params.id, req.user.id, req.user.site_id);
+  next();
 });
 
 /**
@@ -109,10 +121,12 @@ export const deleteConversation = asyncHandler(async (req, res) => {
   const { id } = req.params;
 
   try {
-    const result = await chatService.deleteConversation(id, req.user.id, req.user.role);
     const io = req.app.get('io');
+    const participants = io
+      ? await chatService.getConversationParticipants(id, req.user.site_id, req.user.id).catch(() => [])
+      : [];
+    const result = await chatService.deleteConversation(id, req.user.id, req.user.role, req.user.site_id);
     if (io) {
-      const participants = await chatService.getConversationParticipants(id).catch(() => []);
       participants.forEach((p) => {
         io.to(`user_${p.id}`).emit('chat:conversationDeleted', { conversation_id: id });
       });
@@ -132,14 +146,16 @@ export const deleteConversation = asyncHandler(async (req, res) => {
 export const sendMessage = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const { message } = req.body;
-  if (!message?.trim()) return res.status(400).json({ success: false, message: 'Message text is required' });
+  const messageText = typeof message === 'string' ? message.trim() : '';
+  if (!messageText) return res.status(400).json({ success: false, message: 'Message text is required' });
+  if (messageText.length > 4000) return res.status(400).json({ success: false, message: 'Message must be 4000 characters or fewer' });
 
-  const msg = await chatService.sendMessage(id, req.user.id, message.trim());
+  const msg = await chatService.sendMessage(id, req.user.id, req.user.site_id, messageText);
 
   // Emit via socket if available
   const io = req.app.get('io');
   if (io) {
-    const participants = await chatService.getConversationParticipants(id);
+    const participants = await chatService.getConversationParticipants(id, req.user.site_id, req.user.id);
     participants.forEach(p => {
       if (p.id !== req.user.id) {
         io.to(`user_${p.id}`).emit('chat:message', msg);
@@ -147,7 +163,7 @@ export const sendMessage = asyncHandler(async (req, res) => {
     });
   }
 
-  pushChatNotification(id, req.user.id, msg);
+  pushChatNotification(id, req.user.id, req.user.site_id, msg);
   res.status(201).json({ success: true, message: msg });
 });
 
@@ -159,15 +175,19 @@ export const sendMessage = asyncHandler(async (req, res) => {
 export const sendFileMessage = asyncHandler(async (req, res) => {
   const { id } = req.params;
   if (!req.file) return res.status(400).json({ success: false, message: 'File is required' });
+  if (String(req.body.message || '').trim().length > 4000) {
+    cleanupFile(req.file.path);
+    return res.status(400).json({ success: false, message: 'Message must be 4000 characters or fewer' });
+  }
 
   const msg = await chatService.sendFileMessage(
-    id, req.user.id, req.file, req.body.message
+    id, req.user.id, req.user.site_id, req.file, req.body.message
   );
 
   // Emit via socket if available
   const io = req.app.get('io');
   if (io) {
-    const participants = await chatService.getConversationParticipants(id);
+    const participants = await chatService.getConversationParticipants(id, req.user.site_id, req.user.id);
     participants.forEach(p => {
       if (p.id !== req.user.id) {
         io.to(`user_${p.id}`).emit('chat:message', msg);
@@ -175,7 +195,7 @@ export const sendFileMessage = asyncHandler(async (req, res) => {
     });
   }
 
-  pushChatNotification(id, req.user.id, msg);
+  pushChatNotification(id, req.user.id, req.user.site_id, msg);
   res.status(201).json({ success: true, message: msg });
 });
 
@@ -187,14 +207,16 @@ export const sendFileMessage = asyncHandler(async (req, res) => {
 export const editMessage = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const { message } = req.body;
-  if (!message?.trim()) return res.status(400).json({ success: false, message: 'Message text is required' });
+  const messageText = typeof message === 'string' ? message.trim() : '';
+  if (!messageText) return res.status(400).json({ success: false, message: 'Message text is required' });
+  if (messageText.length > 4000) return res.status(400).json({ success: false, message: 'Message must be 4000 characters or fewer' });
 
   try {
-    const msg = await chatService.editMessage(id, req.user.id, message.trim(), req.user.role);
+    const msg = await chatService.editMessage(id, req.user.id, req.user.site_id, messageText, req.user.role);
 
     const io = req.app.get('io');
     if (io) {
-      const participants = await chatService.getConversationParticipants(msg.conversation_id);
+      const participants = await chatService.getConversationParticipants(msg.conversation_id, req.user.site_id, req.user.id);
       participants.forEach(p => {
         io.to(`user_${p.id}`).emit('chat:messageUpdated', msg);
       });
@@ -214,11 +236,11 @@ export const deleteMessage = asyncHandler(async (req, res) => {
   const { id } = req.params;
 
   try {
-    const msg = await chatService.deleteMessage(id, req.user.id, req.user.role);
+    const msg = await chatService.deleteMessage(id, req.user.id, req.user.site_id, req.user.role);
 
     const io = req.app.get('io');
     if (io) {
-      const participants = await chatService.getConversationParticipants(msg.conversation_id);
+      const participants = await chatService.getConversationParticipants(msg.conversation_id, req.user.site_id, req.user.id);
       participants.forEach(p => {
         io.to(`user_${p.id}`).emit('chat:messageDeleted', { id: msg.id, conversation_id: msg.conversation_id });
       });
@@ -235,7 +257,7 @@ export const deleteMessage = asyncHandler(async (req, res) => {
  * Get all users available for chat
  */
 export const getChatUsers = asyncHandler(async (req, res) => {
-  const users = await chatService.getChatUsers(req.user.id);
+  const users = await chatService.getChatUsers(req.user.id, req.user.site_id);
   res.json({ success: true, users });
 });
 

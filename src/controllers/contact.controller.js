@@ -3,7 +3,7 @@ import contactModel from '../models/Contact.model.js';
 import leadModel from '../models/Lead.model.js';
 import userModel from '../models/User.model.js';
 import pool from '../config/db.js';
-import { bustCache } from '../middlewares/cache.middleware.js';
+import { bustSiteCache } from '../middlewares/cache.middleware.js';
 import { read as xlsxRead, utils as xlsxUtils } from 'xlsx';
 import fs from 'fs';
 
@@ -14,9 +14,11 @@ const getSiteId = async (userId, reqUser) => {
     return user.site_id;
 };
 
-const bustContactCache = () => {
-    bustCache('cache:*:/api/contacts*');
-};
+const bustContactCache = (siteId) => bustSiteCache(
+    siteId,
+    '/api/contacts',
+    '/api/dashboard',
+);
 
 const ensureShiftToCallTable = async (db) => {
     await db.query(`
@@ -66,7 +68,7 @@ export const createContact = asyncHandler(async (req, res) => {
         created_by: req.user.id,
     }, pool);
 
-    bustContactCache();
+    bustContactCache(siteId);
     res.status(201).json({ success: true, contact });
 });
 
@@ -121,7 +123,9 @@ export const updateContact = asyncHandler(async (req, res) => {
     }
 
     const contact = await contactModel.findById(id, pool);
-    if (!contact) return res.status(404).json({ success: false, message: 'Contact not found' });
+    if (!contact || contact.site_id !== req.user.site_id) {
+        return res.status(404).json({ success: false, message: 'Contact not found' });
+    }
 
     const role = req.user.role;
     if ((role === 'AGENT' || role === 'TEAM_HEAD') && contact.created_by !== req.user.id) {
@@ -153,18 +157,19 @@ export const updateContact = asyncHandler(async (req, res) => {
             `UPDATE leads SET ${setCols}, updated_at = NOW() WHERE id = $${vals.length}`,
             vals
         );
-        bustCache('cache:*:/api/followups*');
-        bustCache('cache:*:/api/leads*');
+        bustSiteCache(contact.site_id, '/api/followups', '/api/leads', '/api/dashboard');
     }
 
-    bustContactCache();
+    bustContactCache(contact.site_id);
     res.json({ success: true, contact: updated });
 });
 
 export const deleteContact = asyncHandler(async (req, res) => {
     const { id } = req.params;
     const contact = await contactModel.findById(id, pool);
-    if (!contact) return res.status(404).json({ success: false, message: 'Contact not found' });
+    if (!contact || contact.site_id !== req.user.site_id) {
+        return res.status(404).json({ success: false, message: 'Contact not found' });
+    }
 
     const role = req.user.role;
     if (
@@ -175,7 +180,7 @@ export const deleteContact = asyncHandler(async (req, res) => {
     }
 
     await contactModel.delete(id, pool);
-    bustContactCache();
+    bustContactCache(contact.site_id);
     res.json({ success: true, message: 'Contact deleted' });
 });
 
@@ -189,7 +194,9 @@ export const convertContactToLead = asyncHandler(async (req, res) => {
     if (!siteId) return res.status(404).json({ success: false, message: 'No site assigned' });
 
     const contact = await contactModel.findById(id, pool);
-    if (!contact) return res.status(404).json({ success: false, message: 'Contact not found' });
+    if (!contact || contact.site_id !== siteId) {
+        return res.status(404).json({ success: false, message: 'Contact not found' });
+    }
     if (contact.is_converted) {
         return res.json({ success: true, lead_id: contact.converted_lead_id, message: 'Contact already converted to lead' });
     }
@@ -226,8 +233,8 @@ export const convertContactToLead = asyncHandler(async (req, res) => {
         lead_category: leadForStatus?.lead_category || null,
     }, pool);
 
-    bustContactCache();
-    bustCache('cache:*:/api/leads*');
+    bustContactCache(siteId);
+    bustSiteCache(siteId, '/api/leads');
 
     res.json({ success: true, lead_id: leadId, message: 'Contact converted to lead' });
 });
@@ -355,9 +362,8 @@ export const shiftContactsToCall = asyncHandler(async (req, res) => {
 
         await client.query('COMMIT');
 
-        bustContactCache();
-        bustCache('cache:*:/api/leads*');
-        bustCache('cache:*:/api/calls*');
+        bustContactCache(siteId);
+        bustSiteCache(siteId, '/api/leads', '/api/calls');
 
         res.json({
             success: true,
@@ -463,7 +469,7 @@ export const bulkUploadContacts = asyncHandler(async (req, res) => {
         [imported, failed, JSON.stringify(errors.slice(0, 50)), job.id]
     );
 
-    bustContactCache();
+    bustContactCache(siteId);
 
     res.json({
         success: true,

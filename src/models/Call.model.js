@@ -7,6 +7,8 @@ class CallModel extends MasterModel {
 
   // List calls with joined data — paginated, filterable, role-scoped
   async findWithDetails({ siteId, assignedTo, teamId, leadId, outcomeId, leadCategory, callType, dateFrom, dateTo, page = 1, limit = 20 }, pool) {
+    page = Math.max(Number.parseInt(page, 10) || 1, 1);
+    limit = Math.min(Math.max(Number.parseInt(limit, 10) || 20, 1), 200);
     const conditions = ['c.site_id = $1'];
     const params = [siteId];
     let idx = 2;
@@ -53,8 +55,7 @@ class CallModel extends MasterModel {
       JOIN users u_agent ON c.assigned_to = u_agent.id
       WHERE ${where}
     `;
-    const countResult = await pool.query(countQuery, params);
-    const total = parseInt(countResult.rows[0].total);
+    const countPromise = pool.query(countQuery, [...params]);
 
     const query = `
       SELECT c.*,
@@ -70,7 +71,11 @@ class CallModel extends MasterModel {
       LIMIT $${idx++} OFFSET $${idx++}
     `;
     params.push(limit, offset);
-    const result = await pool.query(query, params);
+    const [countResult, result] = await Promise.all([
+      countPromise,
+      pool.query(query, params),
+    ]);
+    const total = Number.parseInt(countResult.rows[0].total, 10);
 
     return {
       calls: result.rows,
@@ -161,7 +166,7 @@ class CallModel extends MasterModel {
       LEFT JOIN users u ON c.assigned_to = u.id
       WHERE ${where}
     `;
-    const metricsResult = await pool.query(metricsQuery, params);
+    const metricsPromise = pool.query(metricsQuery, params);
 
     const repeatQuery = `
       SELECT
@@ -177,14 +182,7 @@ class CallModel extends MasterModel {
         GROUP BY contact_key
       ) grouped_contacts
     `;
-    const repeatResult = await pool.query(repeatQuery, params);
-    const metrics = {
-      ...metricsResult.rows[0],
-      repeat_contacts: repeatResult.rows[0]?.repeat_contacts || 0,
-      repeat_rate: Number(repeatResult.rows[0]?.unique_contacts || 0) > 0
-        ? Number(((Number(repeatResult.rows[0].repeat_contacts || 0) / Number(repeatResult.rows[0].unique_contacts || 0)) * 100).toFixed(1))
-        : 0,
-    };
+    const repeatPromise = pool.query(repeatQuery, params);
 
     // Outcome distribution
     const outcomeQuery = `
@@ -196,7 +194,7 @@ class CallModel extends MasterModel {
       GROUP BY co.label
       ORDER BY count DESC
     `;
-    const outcomeResult = await pool.query(outcomeQuery, params);
+    const outcomePromise = pool.query(outcomeQuery, params);
 
     const agentParams = [siteId];
     let agentIdx = 2;
@@ -208,7 +206,7 @@ class CallModel extends MasterModel {
       agentParams.push(dateFrom);
     }
     if (dateTo) {
-      agentJoinConditions.push(`c.call_start <= $${agentIdx++}`);
+      agentJoinConditions.push(`c.call_start < ($${agentIdx++}::date + INTERVAL '1 day')`);
       agentParams.push(dateTo);
     }
     if (teamId) {
@@ -236,7 +234,7 @@ class CallModel extends MasterModel {
       ORDER BY call_count DESC
       LIMIT 20
     `;
-    const agentResult = await pool.query(agentPerformanceQuery, agentParams);
+    const agentPromise = pool.query(agentPerformanceQuery, agentParams);
 
 
 
@@ -249,7 +247,7 @@ class CallModel extends MasterModel {
       GROUP BY DATE(c.call_start)::TEXT
       ORDER BY date ASC
     `;
-    const trendResult = await pool.query(trendQuery, params);
+    const trendPromise = pool.query(trendQuery, params);
 
     // Bookings from leads that have calls (conversion)
     const conversionQuery = `
@@ -261,7 +259,31 @@ class CallModel extends MasterModel {
       LEFT JOIN bookings b ON c.lead_id = b.lead_id
       WHERE ${where}
     `;
-    const conversionResult = await pool.query(conversionQuery, params);
+    const conversionPromise = pool.query(conversionQuery, params);
+
+    const [
+      metricsResult,
+      repeatResult,
+      outcomeResult,
+      agentResult,
+      trendResult,
+      conversionResult,
+    ] = await Promise.all([
+      metricsPromise,
+      repeatPromise,
+      outcomePromise,
+      agentPromise,
+      trendPromise,
+      conversionPromise,
+    ]);
+
+    const metrics = {
+      ...metricsResult.rows[0],
+      repeat_contacts: repeatResult.rows[0]?.repeat_contacts || 0,
+      repeat_rate: Number(repeatResult.rows[0]?.unique_contacts || 0) > 0
+        ? Number(((Number(repeatResult.rows[0].repeat_contacts || 0) / Number(repeatResult.rows[0].unique_contacts || 0)) * 100).toFixed(1))
+        : 0,
+    };
 
     return {
       metrics,
@@ -307,6 +329,8 @@ class CallModel extends MasterModel {
 
   // ── Leads Dialer: All leads with phone, last call info, scoped ──
   async getLeadsForDialer({ siteId, assignedTo, teamId, search, status, leadCategory, page = 1, limit = 25 }, pool) {
+    page = Math.max(Number.parseInt(page, 10) || 1, 1);
+    limit = Math.min(Math.max(Number.parseInt(limit, 10) || 25, 1), 200);
     const conditions = ['l.site_id = $1'];
     const params = [siteId];
     let idx = 2;
@@ -342,8 +366,7 @@ class CallModel extends MasterModel {
       LEFT JOIN users u_agent ON l.assigned_to = u_agent.id
       WHERE ${where}
     `;
-    const countResult = await pool.query(countQuery, params);
-    const total = parseInt(countResult.rows[0].total);
+    const countPromise = pool.query(countQuery, [...params]);
 
     const query = `
       SELECT
@@ -381,7 +404,11 @@ class CallModel extends MasterModel {
       LIMIT $${idx++} OFFSET $${idx++}
     `;
     params.push(limit, offset);
-    const result = await pool.query(query, params);
+    const [countResult, result] = await Promise.all([
+      countPromise,
+      pool.query(query, params),
+    ]);
+    const total = Number.parseInt(countResult.rows[0].total, 10);
 
     return {
       leads: result.rows,
@@ -421,6 +448,8 @@ class CallModel extends MasterModel {
 
   // ── Agent call details with full history ──
   async getAgentCallDetails({ siteId, agentId, dateFrom, dateTo, page = 1, limit = 20 }, pool) {
+    page = Math.max(Number.parseInt(page, 10) || 1, 1);
+    limit = Math.min(Math.max(Number.parseInt(limit, 10) || 20, 1), 1_000);
     const conditions = ['c.site_id = $1', 'c.assigned_to = $2'];
     const params = [siteId, agentId];
     let idx = 3;
@@ -430,7 +459,7 @@ class CallModel extends MasterModel {
       params.push(dateFrom);
     }
     if (dateTo) {
-      conditions.push(`c.call_start <= $${idx++}`);
+      conditions.push(`c.call_start < ($${idx++}::date + INTERVAL '1 day')`);
       params.push(dateTo);
     }
 
@@ -442,8 +471,7 @@ class CallModel extends MasterModel {
 
     // Count
     const countQuery = `SELECT COUNT(*) as total FROM ${this.tableName} c WHERE ${where}`;
-    const countResult = await pool.query(countQuery, baseParams);
-    const total = parseInt(countResult.rows[0].total);
+    const countPromise = pool.query(countQuery, baseParams);
 
     // Calls
     const query = `
@@ -460,7 +488,7 @@ class CallModel extends MasterModel {
       LIMIT $${idx++} OFFSET $${idx++}
     `;
     params.push(limit, offset);
-    const result = await pool.query(query, params);
+    const callsPromise = pool.query(query, params);
 
     // Agent summary
     const summaryQuery = `
@@ -478,7 +506,12 @@ class CallModel extends MasterModel {
       FROM ${this.tableName} c
       WHERE ${where}
     `;
-    const summaryResult = await pool.query(summaryQuery, baseParams);
+    const [countResult, result, summaryResult] = await Promise.all([
+      countPromise,
+      callsPromise,
+      pool.query(summaryQuery, baseParams),
+    ]);
+    const total = Number.parseInt(countResult.rows[0].total, 10);
 
     return {
       calls: result.rows,
@@ -749,34 +782,13 @@ class CallModel extends MasterModel {
   async syncDeviceCallLog(callsArray, { siteId, userId }, pool) {
     if (!callsArray || callsArray.length === 0) return { synced: 0, skipped: 0 };
 
-    let synced = 0;
-    let skipped = 0;
-
+    const valid = [];
     for (const call of callsArray) {
       const phone = String(call.phone_number || '').replace(/[^0-9+]/g, '');
-      if (!phone) { skipped++; continue; }
+      if (!phone) continue;
 
       const callStart = call.call_start ? new Date(call.call_start) : new Date();
-      if (isNaN(callStart.getTime())) { skipped++; continue; }
-
-      // Deduplicate: check if a call with same phone + same call_start (±30s) already exists
-      const dupCheck = await pool.query(
-        `SELECT id FROM ${this.tableName}
-         WHERE assigned_to = $1 AND phone_number_dialed = $2
-           AND call_start BETWEEN ($3::timestamptz - interval '30 seconds') AND ($3::timestamptz + interval '30 seconds')
-         LIMIT 1`,
-        [userId, phone, callStart.toISOString()]
-      );
-      if (dupCheck.rows.length > 0) { skipped++; continue; }
-
-      // Try to find a matching lead
-      let leadId = null;
-      const phoneTail = phone.replace(/^(\+91|91|0)/, '');
-      const leadCheck = await pool.query(
-        `SELECT id FROM leads WHERE site_id = $1 AND (phone = $2 OR phone LIKE $3) LIMIT 1`,
-        [siteId, phone, `%${phoneTail}`]
-      );
-      if (leadCheck.rows[0]) leadId = leadCheck.rows[0].id;
+      if (Number.isNaN(callStart.getTime())) continue;
 
       const rawType = String(call.call_type || '').toUpperCase();
       const callType = ['MISSED', 'REJECTED'].includes(rawType) ? 'MISSED'
@@ -785,20 +797,78 @@ class CallModel extends MasterModel {
         : 'INCOMING';
 
       const duration = Math.max(0, Number(call.duration_seconds) || 0);
-      const callStatus = duration > 0 ? 'COMPLETED' : (callType === 'MISSED' ? 'MISSED' : 'COMPLETED');
-
-      await pool.query(
-        `INSERT INTO ${this.tableName}
-          (site_id, lead_id, assigned_to, created_by, call_type, call_start, duration_seconds,
-           call_status, call_source, phone_number_dialed, is_manual_log)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-        [siteId, leadId, userId, userId, callType, callStart.toISOString(), duration,
-         callStatus, 'APP', phone, false]
-      );
-      synced++;
+      valid.push({ phone, callStart: callStart.toISOString(), callType, duration });
     }
 
-    return { synced, skipped };
+    if (valid.length === 0) return { synced: 0, skipped: callsArray.length };
+
+    // One set-based insert replaces up to 600 sequential queries for a
+    // 200-row device sync. Existing rows and duplicates inside this payload
+    // are both removed within the statement.
+    const result = await pool.query(
+      `WITH incoming AS (
+         SELECT x.phone, x.call_start, x.call_type, x.duration_seconds, x.ord
+         FROM UNNEST($3::text[], $4::timestamptz[], $5::text[], $6::int[])
+           WITH ORDINALITY AS x(phone, call_start, call_type, duration_seconds, ord)
+       ), filtered AS (
+         SELECT i.*
+         FROM incoming i
+         WHERE NOT EXISTS (
+           SELECT 1 FROM incoming previous
+           WHERE previous.phone = i.phone
+             AND previous.ord < i.ord
+             AND previous.call_start BETWEEN i.call_start - INTERVAL '30 seconds'
+                                         AND i.call_start + INTERVAL '30 seconds'
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM ${this.tableName} existing
+           WHERE existing.site_id = $1
+             AND existing.assigned_to = $2
+             AND existing.phone_number_dialed = i.phone
+             AND existing.call_start BETWEEN i.call_start - INTERVAL '30 seconds'
+                                         AND i.call_start + INTERVAL '30 seconds'
+         )
+       )
+       INSERT INTO ${this.tableName}
+         (site_id, lead_id, assigned_to, created_by, call_type, call_start,
+          duration_seconds, call_status, call_source, phone_number_dialed, is_manual_log)
+       SELECT $1,
+              matched_lead.id,
+              $2,
+              $2,
+              i.call_type,
+              i.call_start,
+              i.duration_seconds,
+              CASE WHEN i.duration_seconds > 0 THEN 'COMPLETED'
+                   WHEN i.call_type = 'MISSED' THEN 'MISSED' ELSE 'COMPLETED' END,
+              'APP',
+              i.phone,
+              FALSE
+       FROM filtered i
+       LEFT JOIN LATERAL (
+         SELECT l.id
+         FROM leads l
+         WHERE l.site_id = $1
+           AND (l.owner_id = $2 OR l.assigned_to = $2)
+           AND (
+             l.phone = i.phone
+             OR l.phone LIKE '%' || REGEXP_REPLACE(i.phone, '^(\\+91|91|0)', '')
+           )
+         ORDER BY l.created_at DESC
+         LIMIT 1
+       ) matched_lead ON TRUE
+       RETURNING id`,
+      [
+        siteId,
+        userId,
+        valid.map((call) => call.phone),
+        valid.map((call) => call.callStart),
+        valid.map((call) => call.callType),
+        valid.map((call) => Math.floor(call.duration)),
+      ],
+    );
+
+    return { synced: result.rowCount, skipped: callsArray.length - result.rowCount };
   }
 }
 

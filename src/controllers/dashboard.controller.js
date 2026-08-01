@@ -22,6 +22,165 @@ const getScopeFilters = (user) => {
   return {};
 };
 
+const asNumber = (value) => Number(value) || 0;
+
+const getOverviewScope = (user) => {
+  if (user.role === 'AGENT') return { mode: 'USER', principalId: user.id };
+  if (user.role === 'TEAM_HEAD') {
+    return user.team_id
+      ? { mode: 'TEAM', principalId: user.team_id }
+      : { mode: 'USER', principalId: user.id };
+  }
+  return { mode: 'SITE', principalId: null };
+};
+
+// ============================================================
+// GET MOBILE AGENT OVERVIEW
+// One DB round-trip replaces the dashboard's former five API requests.
+// ============================================================
+export const getAgentOverview = asyncHandler(async (req, res) => {
+  const siteId = req.user.site_id;
+  if (!siteId) {
+    return res.status(404).json({ success: false, message: 'No site assigned' });
+  }
+
+  const { mode, principalId } = getOverviewScope(req.user);
+  const result = await pool.query(`
+    WITH scoped_users AS MATERIALIZED (
+      SELECT u.id
+      FROM users u
+      WHERE u.is_active = TRUE
+        AND (
+          ($2::text = 'SITE' AND u.site_id = $1)
+          OR ($2::text = 'USER' AND u.id = $3::uuid)
+          OR ($2::text = 'TEAM' AND u.site_id = $1 AND u.team_id = $3::uuid)
+        )
+    ),
+    lead_stats AS (
+      SELECT
+        COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE l.status = 'NEW')::int AS fresh,
+        COUNT(*) FILTER (WHERE NOT EXISTS (
+          SELECT 1 FROM calls c WHERE c.site_id = l.site_id AND c.lead_id = l.id
+        ))::int AS uncontacted,
+        COUNT(*) FILTER (WHERE EXISTS (
+          SELECT 1 FROM calls c
+          WHERE c.site_id = l.site_id
+            AND c.lead_id = l.id
+            AND COALESCE(c.duration_seconds, 0) > 0
+        ))::int AS matter,
+        COUNT(*) FILTER (WHERE l.status = 'NEW')::int AS new_count,
+        COUNT(*) FILTER (WHERE l.status = 'CONTACTED')::int AS contacted,
+        COUNT(*) FILTER (WHERE l.status = 'INTERESTED')::int AS interested,
+        COUNT(*) FILTER (WHERE l.status = 'NOT_INTERESTED')::int AS not_interested,
+        COUNT(*) FILTER (WHERE l.status = 'SITE_VISIT')::int AS site_visit,
+        COUNT(*) FILTER (WHERE l.status = 'NEGOTIATION')::int AS negotiation,
+        COUNT(*) FILTER (WHERE l.status = 'BOOKED')::int AS booked,
+        COUNT(*) FILTER (WHERE l.status = 'LOST')::int AS lost,
+        COUNT(*) FILTER (WHERE l.status = 'INCOMING_OFF')::int AS incoming_off,
+        COUNT(*) FILTER (WHERE l.status = 'SWITCH_OFF')::int AS switch_off,
+        COUNT(*) FILTER (WHERE l.status = 'NOT_ANSWERING')::int AS not_answering
+      FROM leads l
+      WHERE l.site_id = $1
+        AND ($2::text = 'SITE' OR l.owner_id IN (SELECT id FROM scoped_users)
+          OR l.assigned_to IN (SELECT id FROM scoped_users))
+    ),
+    followup_stats AS (
+      SELECT
+        COUNT(*) FILTER (
+          WHERE f.status IN ('PENDING', 'SNOOZED')
+            AND f.scheduled_at >= CURRENT_DATE
+            AND f.scheduled_at < CURRENT_DATE + INTERVAL '1 day'
+        )::int AS today,
+        COUNT(*) FILTER (WHERE f.status = 'PENDING' AND f.scheduled_at < NOW())::int AS overdue,
+        COUNT(*) FILTER (WHERE f.status IN ('PENDING', 'SNOOZED') AND f.scheduled_at >= NOW())::int AS upcoming,
+        COUNT(*) FILTER (WHERE f.status = 'COMPLETED')::int AS completed,
+        COUNT(*) FILTER (WHERE f.status = 'ESCALATED')::int AS escalated
+      FROM followups f
+      WHERE f.site_id = $1
+        AND ($2::text = 'SITE' OR f.assigned_to IN (SELECT id FROM scoped_users))
+    ),
+    contact_stats AS (
+      SELECT COUNT(*)::int AS total
+      FROM contacts c
+      WHERE c.site_id = $1
+        AND ($2::text = 'SITE' OR c.created_by IN (SELECT id FROM scoped_users))
+    ),
+    call_stats AS (
+      SELECT
+        COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE COALESCE(c.duration_seconds, 0) > 0)::int AS connected,
+        COUNT(*) FILTER (
+          WHERE c.call_type = 'MISSED' OR c.call_status IN ('MISSED', 'FAILED')
+        )::int AS missed,
+        COALESCE(ROUND(AVG(c.duration_seconds)), 0)::int AS avg_duration
+      FROM calls c
+      WHERE c.site_id = $1
+        AND c.call_start >= CURRENT_DATE
+        AND c.call_start < CURRENT_DATE + INTERVAL '1 day'
+        AND ($2::text = 'SITE' OR c.assigned_to IN (SELECT id FROM scoped_users))
+    )
+    SELECT ls.*, fs.today AS followup_today, fs.overdue, fs.upcoming,
+      fs.completed AS followup_completed, fs.escalated,
+      cs.total AS contact_total,
+      cas.total AS call_total, cas.connected, cas.missed, cas.avg_duration
+    FROM lead_stats ls
+    CROSS JOIN followup_stats fs
+    CROSS JOIN contact_stats cs
+    CROSS JOIN call_stats cas
+  `, [siteId, mode, principalId]);
+
+  const row = result.rows[0] || {};
+  const callTotal = asNumber(row.call_total);
+  const connected = asNumber(row.connected);
+  const upcoming = asNumber(row.upcoming);
+  const overdue = asNumber(row.overdue);
+
+  return res.json({
+    success: true,
+    data: {
+      leads: {
+        total: asNumber(row.total),
+        fresh: asNumber(row.fresh),
+        uncontacted: asNumber(row.uncontacted),
+        matter: asNumber(row.matter),
+        byStatus: {
+          NEW: asNumber(row.new_count),
+          CONTACTED: asNumber(row.contacted),
+          INTERESTED: asNumber(row.interested),
+          NOT_INTERESTED: asNumber(row.not_interested),
+          SITE_VISIT: asNumber(row.site_visit),
+          NEGOTIATION: asNumber(row.negotiation),
+          BOOKED: asNumber(row.booked),
+          LOST: asNumber(row.lost),
+          INCOMING_OFF: asNumber(row.incoming_off),
+          SWITCH_OFF: asNumber(row.switch_off),
+          NOT_ANSWERING: asNumber(row.not_answering),
+        },
+      },
+      followups: {
+        today: asNumber(row.followup_today),
+        overdue,
+        upcoming,
+        scheduled: upcoming,
+        missed: overdue,
+        completed: asNumber(row.followup_completed),
+        escalated: asNumber(row.escalated),
+      },
+      contacts: { total: asNumber(row.contact_total) },
+      calls: {
+        total: callTotal,
+        today: callTotal,
+        connected,
+        missed: asNumber(row.missed),
+        avgDuration: asNumber(row.avg_duration),
+        connectRate: callTotal > 0 ? Number(((connected / callTotal) * 100).toFixed(1)) : 0,
+      },
+      generatedAt: new Date().toISOString(),
+    },
+  });
+});
+
 // ============================================================
 // GET COMPLETE DASHBOARD STATS
 // ============================================================
@@ -50,8 +209,8 @@ export const getDashboardStats = asyncHandler(async (req, res) => {
     plotBookingModel.getStats(siteId, pool, scope.assignedTo),
     // Call analytics
     callModel.getAnalytics({ siteId, ...scope }, pool),
-    // Leads list - using findWithDetails with limit 100
-    leadModel.findWithDetails({ site_id: siteId, assigned_to: scope.assignedTo }, 1, 100, pool),
+    // Accurate aggregate + ten recent leads without fetching 100 full rows.
+    leadModel.getDashboardSummary({ siteId, assignedTo: scope.assignedTo }, pool),
     // Booking trend for last 30 days
     getBookingTrend(siteId, scope.assignedTo),
   ]);
@@ -59,12 +218,14 @@ export const getDashboardStats = asyncHandler(async (req, res) => {
   const siteStats = siteStatsRes.status === 'fulfilled' ? siteStatsRes.value : null;
   const bookingStats = bookingStatsRes.status === 'fulfilled' ? bookingStatsRes.value : null;
   const callAnalytics = callAnalyticsRes.status === 'fulfilled' ? callAnalyticsRes.value : null;
-  const leadsResult = leadsRes.status === 'fulfilled' ? leadsRes.value : { items: [], pagination: {} };
-  const leads = leadsResult.items || [];
+  const leadSummary = leadsRes.status === 'fulfilled'
+    ? leadsRes.value
+    : { recent: [], total: 0, pipeline: {} };
+  const leads = leadSummary.recent || [];
   const bookingTrend = bookingTrendRes.status === 'fulfilled' ? bookingTrendRes.value : [];
 
   // Calculate derived metrics
-  const leadTotal = leads?.length || 0;
+  const leadTotal = Number(leadSummary.total) || 0;
   const conversionRate = bookingStats && leadTotal
     ? ((Number(bookingStats.completed_bookings) / leadTotal) * 100).toFixed(1)
     : null;
@@ -79,9 +240,9 @@ export const getDashboardStats = asyncHandler(async (req, res) => {
     BOOKED: 0,
     LOST: 0,
   };
-  leads?.forEach(l => {
-    if (pipeline[l.status] !== undefined) pipeline[l.status]++;
-  });
+  for (const [status, count] of Object.entries(leadSummary.pipeline || {})) {
+    if (pipeline[status] !== undefined) pipeline[status] = Number(count) || 0;
+  }
 
   res.json({
     success: true,

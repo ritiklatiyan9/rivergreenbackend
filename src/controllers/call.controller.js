@@ -4,8 +4,7 @@ import followupModel from '../models/Followup.model.js';
 import callOutcomeModel from '../models/CallOutcome.model.js';
 import userModel from '../models/User.model.js';
 import pool from '../config/db.js';
-import { bustCache } from '../middlewares/cache.middleware.js';
-import redisClient from '../config/redis.js';
+import { bustSiteCache } from '../middlewares/cache.middleware.js';
 
 // ============================================================
 // Helper: Get requester's site_id
@@ -18,6 +17,13 @@ const getSiteId = async (userId, reqUser) => {
 };
 
 const ADMIN_ROLES = new Set(['ADMIN', 'OWNER', 'SUPERVISOR']);
+
+const bustCallCache = (siteId, ...additionalPaths) => bustSiteCache(
+    siteId,
+    '/api/calls',
+    '/api/dashboard',
+    ...additionalPaths,
+);
 
 const normalizeRole = (role) => String(role || '').toUpperCase();
 
@@ -126,10 +132,6 @@ const buildAnalyticsScope = async ({ req, dbUser, agentId, requestedTeamId }) =>
     return { scope, analyticsScope };
 };
 
-const analyticsCacheKey = ({ prefix, siteId, assignedTo, teamId, dateFrom, dateTo }) => (
-    `${prefix}:${siteId}:agent:${assignedTo || 'all'}:team:${teamId || 'all'}:${dateFrom || 'all'}:${dateTo || 'all'}`
-);
-
 const ensureShiftToCallTable = async (db) => {
     await db.query(`
         CREATE TABLE IF NOT EXISTS shift_to_call_queue (
@@ -174,6 +176,31 @@ export const logCall = asyncHandler(async (req, res) => {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
 
+    const leadResult = await pool.query(
+        'SELECT id, owner_id, assigned_to FROM leads WHERE id = $1 AND site_id = $2 LIMIT 1',
+        [lead_id, siteId],
+    );
+    const targetLead = leadResult.rows[0];
+    if (!targetLead) {
+        return res.status(404).json({ success: false, message: 'Lead not found' });
+    }
+    if ((req.user.role === 'AGENT' || req.user.role === 'TEAM_HEAD')
+        && targetLead.owner_id !== req.user.id && targetLead.assigned_to !== req.user.id) {
+        return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
+    let effectiveAssignedTo = req.user.id;
+    if (req.body.assigned_to && ADMIN_ROLES.has(req.user.role)) {
+        const assignee = await pool.query(
+            'SELECT id FROM users WHERE id = $1 AND site_id = $2 AND is_active = TRUE LIMIT 1',
+            [req.body.assigned_to, siteId],
+        );
+        if (!assignee.rows[0]) {
+            return res.status(400).json({ success: false, message: 'Invalid assignee' });
+        }
+        effectiveAssignedTo = assignee.rows[0].id;
+    }
+
     // Calculate duration
     let duration_seconds = 0;
     if (call_start && call_end) {
@@ -183,7 +210,7 @@ export const logCall = asyncHandler(async (req, res) => {
     const callData = {
         site_id: siteId,
         lead_id,
-        assigned_to: req.body.assigned_to || req.user.id,
+        assigned_to: effectiveAssignedTo,
         created_by: req.user.id,
         call_type: call_type || 'OUTGOING',
         call_start: call_start || new Date().toISOString(),
@@ -239,10 +266,7 @@ export const logCall = asyncHandler(async (req, res) => {
         }
     }
 
-    bustCache('cache:*:/api/calls*');
-    bustCache('cache:*:/api/followups*');
-    bustCache('cache:*:/api/dashboard*');
-    bustCache('cache:*:/api/leads*');
+    bustCallCache(siteId, '/api/followups', '/api/leads');
 
     res.status(201).json({ success: true, call, followup });
 });
@@ -283,8 +307,11 @@ export const getCalls = asyncHandler(async (req, res) => {
 // ============================================================
 export const getCall = asyncHandler(async (req, res) => {
     const call = await callModel.findByIdWithDetails(req.params.id, pool);
-    if (!call) {
+    if (!call || call.site_id !== req.user.site_id) {
         return res.status(404).json({ success: false, message: 'Call not found' });
+    }
+    if (req.user.role === 'AGENT' && call.assigned_to !== req.user.id) {
+        return res.status(403).json({ success: false, message: 'Access denied' });
     }
     res.json({ success: true, call });
 });
@@ -295,7 +322,7 @@ export const getCall = asyncHandler(async (req, res) => {
 export const updateCall = asyncHandler(async (req, res) => {
     const { id } = req.params;
     const existing = await callModel.findById(id, pool);
-    if (!existing) {
+    if (!existing || existing.site_id !== req.user.site_id) {
         return res.status(404).json({ success: false, message: 'Call not found' });
     }
 
@@ -316,6 +343,16 @@ export const updateCall = asyncHandler(async (req, res) => {
         if (req.body[field] !== undefined) updateData[field] = req.body[field];
     }
 
+    if (updateData.lead_id) {
+        const targetLead = await pool.query(
+            'SELECT id FROM leads WHERE id = $1 AND site_id = $2 LIMIT 1',
+            [updateData.lead_id, existing.site_id],
+        );
+        if (!targetLead.rows[0]) {
+            return res.status(400).json({ success: false, message: 'Invalid lead' });
+        }
+    }
+
     // Recalc duration
     if (updateData.call_start || updateData.call_end) {
         const start = new Date(updateData.call_start || existing.call_start);
@@ -330,7 +367,7 @@ export const updateCall = asyncHandler(async (req, res) => {
     }
 
     const updated = await callModel.update(id, updateData, pool);
-    bustCache('cache:*:/api/calls*');
+    bustCallCache(existing.site_id, '/api/leads');
     res.json({ success: true, call: updated });
 });
 
@@ -339,12 +376,12 @@ export const updateCall = asyncHandler(async (req, res) => {
 // ============================================================
 export const deleteCall = asyncHandler(async (req, res) => {
     const call = await callModel.findById(req.params.id, pool);
-    if (!call) {
+    if (!call || call.site_id !== req.user.site_id) {
         return res.status(404).json({ success: false, message: 'Call not found' });
     }
 
     await callModel.delete(req.params.id, pool);
-    bustCache('cache:*:/api/calls*');
+    bustCallCache(call.site_id, '/api/leads');
     res.json({ success: true, message: 'Call deleted successfully' });
 });
 
@@ -352,6 +389,16 @@ export const deleteCall = asyncHandler(async (req, res) => {
 // GET CALLS BY LEAD (timeline)
 // ============================================================
 export const getCallsByLead = asyncHandler(async (req, res) => {
+    const leadResult = await pool.query(
+        'SELECT id, owner_id, assigned_to FROM leads WHERE id = $1 AND site_id = $2 LIMIT 1',
+        [req.params.leadId, req.user.site_id],
+    );
+    const lead = leadResult.rows[0];
+    if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
+    if ((req.user.role === 'AGENT' || req.user.role === 'TEAM_HEAD')
+        && lead.owner_id !== req.user.id && lead.assigned_to !== req.user.id) {
+        return res.status(403).json({ success: false, message: 'Access denied' });
+    }
     const calls = await callModel.findByLead(req.params.leadId, pool);
     res.json({ success: true, calls });
 });
@@ -377,37 +424,11 @@ export const getCallAnalytics = asyncHandler(async (req, res) => {
         requestedTeamId: team_id || null,
     });
 
-    // Build cache key
-    const cacheKey = analyticsCacheKey({
-        prefix: 'analytics:calls',
-        siteId: dbUser.site_id,
-        assignedTo: analyticsScope.assignedTo,
-        teamId: analyticsScope.teamId,
-        dateFrom: date_from,
-        dateTo: date_to,
-    });
-
-    try {
-        const cached = await redisClient.get(cacheKey);
-        if (cached) {
-            return res.json({ success: true, ...JSON.parse(cached), cached: true });
-        }
-    } catch (err) {
-        // Redis down — skip
-    }
-
     const analytics = await callModel.getAnalytics({
         ...analyticsScope,
         dateFrom: date_from,
         dateTo: date_to,
     }, pool);
-
-    // Cache for 60 seconds
-    try {
-        await redisClient.setEx(cacheKey, 60, JSON.stringify(analytics));
-    } catch (err) {
-        // ignore
-    }
 
     res.json({ success: true, ...analytics });
 });
@@ -444,13 +465,47 @@ export const bulkLogCalls = asyncHandler(async (req, res) => {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
 
-    // Validate each entry
+    // Validate each entry before opening the transaction.
     for (let i = 0; i < callEntries.length; i++) {
         if (!callEntries[i].lead_id) {
             return res.status(400).json({
                 success: false,
                 message: `Row ${i + 1}: Lead is required`,
             });
+        }
+    }
+
+    const leadIds = [...new Set(callEntries.map((entry) => String(entry.lead_id)))];
+    const leadResult = await pool.query(
+        `SELECT id, owner_id, assigned_to FROM leads
+         WHERE site_id = $1 AND id = ANY($2::uuid[])`,
+        [siteId, leadIds],
+    );
+    const leadsById = new Map(leadResult.rows.map((lead) => [String(lead.id), lead]));
+    for (let i = 0; i < callEntries.length; i++) {
+        const lead = leadsById.get(String(callEntries[i].lead_id));
+        if (!lead) {
+            return res.status(400).json({ success: false, message: `Row ${i + 1}: Invalid lead` });
+        }
+        if ((req.user.role === 'AGENT' || req.user.role === 'TEAM_HEAD')
+            && lead.owner_id !== req.user.id && lead.assigned_to !== req.user.id) {
+            return res.status(403).json({ success: false, message: `Row ${i + 1}: Access denied` });
+        }
+    }
+
+    const requestedAssigneeIds = ADMIN_ROLES.has(req.user.role)
+        ? [...new Set(callEntries.map((entry) => entry.assigned_to).filter(Boolean).map(String))]
+        : [];
+    const validAssigneeIds = new Set();
+    if (requestedAssigneeIds.length > 0) {
+        const assignees = await pool.query(
+            `SELECT id FROM users
+             WHERE site_id = $1 AND is_active = TRUE AND id = ANY($2::uuid[])`,
+            [siteId, requestedAssigneeIds],
+        );
+        assignees.rows.forEach((user) => validAssigneeIds.add(String(user.id)));
+        if (validAssigneeIds.size !== requestedAssigneeIds.length) {
+            return res.status(400).json({ success: false, message: 'One or more assignees are invalid' });
         }
     }
 
@@ -466,7 +521,9 @@ export const bulkLogCalls = asyncHandler(async (req, res) => {
         return {
             site_id: siteId,
             lead_id: entry.lead_id,
-            assigned_to: entry.assigned_to || req.user.id,
+            assigned_to: ADMIN_ROLES.has(req.user.role) && entry.assigned_to
+                ? entry.assigned_to
+                : req.user.id,
             created_by: req.user.id,
             call_type: entry.call_type || 'OUTGOING',
             call_start: entry.call_start || new Date().toISOString(),
@@ -507,7 +564,7 @@ export const bulkLogCalls = asyncHandler(async (req, res) => {
                         site_id: siteId,
                         lead_id: call.lead_id,
                         call_id: call.id,
-                        assigned_to: entry.assigned_to || req.user.id,
+                        assigned_to: call.assigned_to,
                         created_by: req.user.id,
                         followup_type: entry.followup_type || 'CALL',
                         status: 'PENDING',
@@ -534,8 +591,7 @@ export const bulkLogCalls = asyncHandler(async (req, res) => {
 
         await client.query('COMMIT');
 
-        bustCache('cache:*:/api/calls*');
-        bustCache('cache:*:/api/followups*');
+        bustCallCache(siteId, '/api/followups', '/api/leads');
 
         res.status(201).json({
             success: true,
@@ -702,22 +758,46 @@ export const quickLogCall = asyncHandler(async (req, res) => {
     let targetLeadId = lead_id;
     let targetPhone = phone_number;
 
-    // If only lead_id is provided, get the phone
-    if (lead_id && !phone_number) {
-        const leadResult = await pool.query('SELECT phone FROM leads WHERE id = $1', [lead_id]);
-        if (leadResult.rows[0]) {
-            targetPhone = leadResult.rows[0].phone;
+    // A supplied lead id is authoritative and must be both tenant-scoped and
+    // visible to the current agent before it can be linked to a call.
+    if (lead_id) {
+        const leadResult = await pool.query(
+            'SELECT id, phone, owner_id, assigned_to FROM leads WHERE id = $1 AND site_id = $2 LIMIT 1',
+            [lead_id, siteId],
+        );
+        const lead = leadResult.rows[0];
+        if (!lead) {
+            return res.status(404).json({ success: false, message: 'Lead not found' });
         }
+        if ((req.user.role === 'AGENT' || req.user.role === 'TEAM_HEAD')
+            && lead.owner_id !== req.user.id && lead.assigned_to !== req.user.id) {
+            return res.status(403).json({ success: false, message: 'Access denied' });
+        }
+        targetLeadId = lead.id;
+        targetPhone = lead.phone || phone_number;
     } 
     // If only phone is provided, try to find a lead or contact
-    else if (!lead_id && phone_number) {
+    else if (phone_number) {
+        const scopedRole = req.user.role === 'AGENT' || req.user.role === 'TEAM_HEAD';
         // Search in leads first
-        const leadCheck = await pool.query('SELECT id FROM leads WHERE site_id = $1 AND phone = $2 LIMIT 1', [siteId, phone_number]);
+        const leadCheck = await pool.query(
+            `SELECT id FROM leads
+             WHERE site_id = $1 AND phone = $2
+               AND ($3::boolean = FALSE OR owner_id = $4 OR assigned_to = $4)
+             LIMIT 1`,
+            [siteId, phone_number, scopedRole, req.user.id],
+        );
         if (leadCheck.rows[0]) {
             targetLeadId = leadCheck.rows[0].id;
         } else {
             // Search in contacts
-            const contactCheck = await pool.query('SELECT id, name FROM contacts WHERE site_id = $1 AND phone = $2 LIMIT 1', [siteId, phone_number]);
+            const contactCheck = await pool.query(
+                `SELECT id, name FROM contacts
+                 WHERE site_id = $1 AND phone = $2
+                   AND ($3::boolean = FALSE OR created_by = $4)
+                 LIMIT 1`,
+                [siteId, phone_number, scopedRole, req.user.id],
+            );
             if (contactCheck.rows[0]) {
                 // If it's a contact, we might want to auto-convert to lead or just link it if the schema allows.
                 // The current schema for 'calls' has a lead_id. Let's see if it can be null or if we should auto-convert.
@@ -782,7 +862,7 @@ export const quickLogCall = asyncHandler(async (req, res) => {
                      RETURNING *`,
                     [normalizedCallStatus, incomingDuration, endTimestamp, normalizedCallType, existing.id]
                 );
-                bustCache('cache:*:/api/calls*');
+                bustCallCache(siteId, '/api/leads');
                 return res.status(200).json({
                     success: true,
                     deduped: true,
@@ -852,9 +932,7 @@ export const quickLogCall = asyncHandler(async (req, res) => {
         }
     }
 
-    bustCache('cache:*:/api/calls*');
-    bustCache('cache:*:/api/contacts*');
-    bustCache('cache:*:/api/leads*');
+    bustCallCache(siteId, '/api/contacts', '/api/leads');
 
     res.status(201).json({
         success: true,
@@ -871,11 +949,11 @@ export const endCallSession = asyncHandler(async (req, res) => {
     const { outcome_id, next_action, customer_notes, lead_category, duration_seconds, call_status } = req.body;
 
     const existing = await callModel.findById(id, pool);
-    if (!existing) {
+    if (!existing || existing.site_id !== req.user.site_id) {
         return res.status(404).json({ success: false, message: 'Call not found' });
     }
 
-    if (existing.assigned_to !== req.user.id && !['ADMIN', 'OWNER'].includes(req.user.role)) {
+    if (existing.assigned_to !== req.user.id && !ADMIN_ROLES.has(req.user.role)) {
         return res.status(403).json({ success: false, message: 'Access denied' });
     }
 
@@ -908,8 +986,7 @@ export const endCallSession = asyncHandler(async (req, res) => {
         await pool.query('UPDATE leads SET lead_category = $1, updated_at = NOW() WHERE id = $2', [catValue, existing.lead_id]);
     }
 
-    bustCache('cache:*:/api/calls*');
-    bustCache('cache:*:/api/leads*');
+    bustCallCache(existing.site_id, '/api/leads');
 
     res.json({ success: true, call: updatedCall });
 });
@@ -981,33 +1058,11 @@ export const getAdvancedAnalytics = asyncHandler(async (req, res) => {
         requestedTeamId: team_id || null,
     });
 
-    // Build cache key
-    const cacheKey = analyticsCacheKey({
-        prefix: 'analytics:advanced',
-        siteId: dbUser.site_id,
-        assignedTo: analyticsScope.assignedTo,
-        teamId: analyticsScope.teamId,
-        dateFrom: date_from,
-        dateTo: date_to,
-    });
-
-    try {
-        const cached = await redisClient.get(cacheKey);
-        if (cached) {
-            return res.json({ success: true, ...JSON.parse(cached), cached: true });
-        }
-    } catch (err) { /* Redis down — skip */ }
-
     const analytics = await callModel.getAdvancedAnalytics({
         ...analyticsScope,
         dateFrom: date_from,
         dateTo: date_to,
     }, pool);
-
-    // Cache for 120 seconds
-    try {
-        await redisClient.setEx(cacheKey, 120, JSON.stringify(analytics));
-    } catch (err) { /* ignore */ }
 
     res.json({ success: true, ...analytics });
 });
@@ -1093,7 +1148,7 @@ export const syncDeviceCallLog = asyncHandler(async (req, res) => {
         userId: req.user.id,
     }, pool);
 
-    bustCache('cache:*:/api/calls*');
+    bustCallCache(siteId, '/api/leads');
 
     res.json({ success: true, ...result });
 });
