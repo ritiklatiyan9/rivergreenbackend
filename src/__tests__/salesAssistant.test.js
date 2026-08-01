@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   AssistantInputError,
+  classifyAssistantIntent,
   createSalesAssistant,
   extractSearchTerm,
   loadSalesContext,
@@ -76,6 +77,68 @@ const contextFixture = ({ searchMatches = [] } = {}) => ({
   searchMatches,
 });
 
+const priorityQueueFixture = () => {
+  const context = contextFixture();
+  context.followups = Array.from({ length: 8 }, (_, index) => ({
+    id: `followup-priority-${index + 1}`,
+    leadId: `lead-priority-${index + 1}`,
+    followupType: 'CALL',
+    status: 'PENDING',
+    dueAt: `2026-08-0${Math.min(index + 1, 7)}T05:00:00.000Z`,
+    name: `Priority Person ${index + 1}`,
+    phone: `90000000${String(index + 1).padStart(2, '0')}`,
+    leadStatus: index % 2 === 0 ? 'INTERESTED' : 'NEW',
+    leadCategory: index % 3 === 0 ? 'PRIME' : index % 3 === 1 ? 'HOT' : 'NORMAL',
+    timelineEvidence: `Last connected ${index + 1} day ago · requested callback`,
+  }));
+  context.freshLeads = Array.from({ length: 4 }, (_, index) => ({
+    id: `fresh-priority-${index + 1}`,
+    name: `Fresh Person ${index + 1}`,
+    phone: `91111111${String(index + 1).padStart(2, '0')}`,
+    status: 'NEW',
+    leadCategory: index === 0 ? 'PRIME' : 'HOT',
+    leadSource: 'Referral',
+  }));
+  context.recentCalls = [];
+  context.contacts = [];
+  return context;
+};
+
+const weightedPriorityFixture = () => {
+  const context = contextFixture();
+  context.followups = [
+    {
+      id: 'normal-new-overdue', leadId: 'lead-normal-new', followupType: 'CALL', status: 'PENDING',
+      dueAt: '2026-07-29T05:00:00.000Z', name: 'Normal New', phone: '9200000001',
+      leadStatus: 'NEW', leadCategory: 'NORMAL', timelineEvidence: 'No connected call yet',
+    },
+    {
+      id: 'hot-new', leadId: 'lead-hot-new', followupType: 'CALL', status: 'PENDING',
+      dueAt: '2026-08-01T05:30:00.000Z', name: 'Hot New', phone: '9200000002',
+      leadStatus: 'NEW', leadCategory: 'HOT', timelineEvidence: 'Last call 30 Jul · no answer',
+    },
+    {
+      id: 'hot-interested', leadId: 'lead-hot-interested', followupType: 'CALL', status: 'PENDING',
+      dueAt: '2026-08-01T05:45:00.000Z', name: 'Hot Interested', phone: '9200000003',
+      leadStatus: 'INTERESTED', leadCategory: 'HOT', timelineEvidence: 'Connected 31 Jul · requested callback today',
+    },
+    {
+      id: 'prime-new', leadId: 'lead-prime-new', followupType: 'CALL', status: 'PENDING',
+      dueAt: '2026-08-01T06:00:00.000Z', name: 'Prime New', phone: '9200000004',
+      leadStatus: 'NEW', leadCategory: 'PRIME', timelineEvidence: 'Last call 30 Jul · no answer',
+    },
+    {
+      id: 'prime-interested', leadId: 'lead-prime-interested', followupType: 'CALL', status: 'PENDING',
+      dueAt: '2026-08-01T06:15:00.000Z', name: 'Prime Interested', phone: '9200000005',
+      leadStatus: 'INTERESTED', leadCategory: 'PRIME', timelineEvidence: 'Connected 31 Jul · requested callback today',
+    },
+  ];
+  context.freshLeads = [];
+  context.recentCalls = [];
+  context.contacts = [];
+  return context;
+};
+
 const makeDb = (context, inspect = () => {}) => ({
   async query(sql, params) {
     inspect(sql, params);
@@ -126,7 +189,7 @@ test('database context is always scoped with authenticated site and user', async
       assert.match(sql, /FROM payments p/);
       assert.match(sql, /FROM supervision_tasks st/);
       assert.match(sql, /FROM attendance_records ar/);
-      assert.deepEqual(params, ['site-1', 'user-1', false, 8, 'Rahul', false, false]);
+      assert.deepEqual(params, ['site-1', 'user-1', false, 8, 'Rahul', false, false, false]);
     }),
     user,
     searchTerm: 'Rahul',
@@ -179,6 +242,149 @@ test('returns deterministic call cards when OpenRouter is not configured', async
   assert.equal(result.cards[0].followupId, 'followup-1');
   assert.equal(result.cards[0].phone, '+91 99999 11111');
   assert.match(result.answer, /priority|call/i);
+});
+
+test('Hinglish top-call wording is a prioritized-call intent, not a schedule request', () => {
+  assert.equal(
+    classifyAssistantIntent('Mujhe top 5 log do jinhe call karni chahiye'),
+    'priorities',
+  );
+  assert.equal(classifyAssistantIntent('Aaj ke scheduled follow-ups dikhao'), 'followups');
+});
+
+test('prioritized-call requests return exactly the requested top N', async () => {
+  const assistant = createSalesAssistant({
+    db: makeDb(priorityQueueFixture()),
+    env: {},
+    now: fixedNow,
+  });
+
+  const result = await assistant.answer({
+    user,
+    body: { message: 'Mujhe top 5 log do jinhe call karni chahiye' },
+  });
+
+  assert.equal(result.cards.length, 5);
+});
+
+test('prioritized-call requested counts are capped at the safe card maximum', async () => {
+  const assistant = createSalesAssistant({
+    db: makeDb(priorityQueueFixture()),
+    env: {},
+    now: fixedNow,
+  });
+
+  const result = await assistant.answer({
+    user,
+    body: { message: 'Mujhe top 500 log do jinhe call karni chahiye' },
+  });
+
+  assert.equal(result.cards.length, 8);
+});
+
+test('prioritized calls weight PRIME/HOT and INTERESTED ahead of generic overdue rows', async () => {
+  const assistant = createSalesAssistant({
+    db: makeDb(weightedPriorityFixture()),
+    env: {},
+    now: fixedNow,
+  });
+
+  const result = await assistant.answer({
+    user,
+    body: { message: 'Mujhe top 5 log do jinhe call karni chahiye' },
+  });
+
+  const rankedIds = result.cards.map((card) => card.id);
+  assert.deepEqual(new Set(rankedIds.slice(0, 2)), new Set(['prime-interested', 'hot-interested']));
+  assert.ok(rankedIds.indexOf('prime-interested') < rankedIds.indexOf('prime-new'));
+  assert.ok(rankedIds.indexOf('hot-interested') < rankedIds.indexOf('hot-new'));
+  assert.equal(rankedIds.at(-1), 'normal-new-overdue');
+});
+
+test('prioritized call reasons include grounded timeline evidence', async () => {
+  const context = weightedPriorityFixture();
+  context.followups = context.followups.filter((item) => item.id === 'prime-interested');
+  const assistant = createSalesAssistant({
+    db: makeDb(context),
+    env: {},
+    now: fixedNow,
+  });
+
+  const result = await assistant.answer({
+    user,
+    body: { message: 'Mujhe top 1 log do jinhe call karni chahiye' },
+  });
+
+  assert.equal(result.cards.length, 1);
+  assert.match(result.cards[0].reason, /connected.*31 Jul/i);
+  assert.match(result.cards[0].reason, /requested callback today/i);
+});
+
+test('prioritized-call context and cache remain isolated by current site and user', async () => {
+  const seenScopes = [];
+  const db = {
+    async query(sql, params) {
+      assert.match(sql, /l\.site_id = \$1/);
+      assert.match(sql, /\$3::boolean\s+OR l\.owner_id = \$2\s+OR l\.assigned_to = \$2/);
+      assert.match(sql, /f\.site_id = \$1/);
+      assert.match(sql, /\$3::boolean\s+OR f\.assigned_to = \$2/);
+      const [siteId, userId] = params;
+      seenScopes.push(`${siteId}:${userId}`);
+      const context = contextFixture();
+      context.followups = [{
+        id: `followup-${siteId}-${userId}`,
+        leadId: `lead-${siteId}-${userId}`,
+        followupType: 'CALL',
+        status: 'PENDING',
+        dueAt: '2026-08-01T05:00:00.000Z',
+        name: `${siteId} ${userId}`,
+        phone: siteId === 'site-1' ? '9300000001' : '9300000002',
+        leadStatus: 'INTERESTED',
+        leadCategory: 'PRIME',
+        timelineEvidence: 'Connected 31 Jul · requested callback today',
+      }];
+      context.freshLeads = [];
+      return { rows: [{ context }] };
+    },
+  };
+  const assistant = createSalesAssistant({
+    db,
+    env: { AI_CONTEXT_CACHE_TTL_MS: '8000' },
+    now: fixedNow,
+  });
+
+  const first = await assistant.answer({
+    user,
+    body: { message: 'Mujhe top 1 log do jinhe call karni chahiye' },
+  });
+  const secondUser = { ...user, id: 'user-2', site_id: 'site-2' };
+  const second = await assistant.answer({
+    user: secondUser,
+    body: { message: 'Mujhe top 1 log do jinhe call karni chahiye' },
+  });
+
+  assert.deepEqual(seenScopes, ['site-1:user-1', 'site-2:user-2']);
+  assert.equal(first.cards[0].id, 'followup-site-1-user-1');
+  assert.equal(second.cards[0].id, 'followup-site-2-user-2');
+  assert.notEqual(first.cards[0].phone, second.cards[0].phone);
+});
+
+test('priority SQL prefilters candidates and reads one coherent latest timeline event', async () => {
+  await loadSalesContext({
+    db: makeDb(contextFixture(), (sql, params) => {
+      assert.equal(params[7], true);
+      assert.match(sql, /priority_candidate_scope AS/);
+      assert.match(sql, /priority_latest_call AS/);
+      assert.match(sql, /SELECT DISTINCT ON \(c\.lead_id\)/);
+      assert.match(sql, /c\.call_start >= NOW\(\) - INTERVAL '3 hours'/);
+      assert.match(sql, /f\.scheduled_at <= NOW\(\) \+ INTERVAL '24 hours'/);
+      assert.doesNotMatch(sql, /ARRAY_AGG\(c\.next_action/);
+      assert.doesNotMatch(sql, /priority_booking_rollup AS/);
+    }),
+    user,
+    cardLimit: 5,
+    priorityMode: true,
+  });
 });
 
 test('OpenRouter receives only safe aggregate context and cannot author cards', async () => {
@@ -381,7 +587,7 @@ test('bookings, payments, tasks, and attendance return scoped aggregates without
   }
 });
 
-test('hot context cache coalesces concurrent requests for the same user and site', async () => {
+test('hot context cache coalesces requests within separate general and priority modes', async () => {
   let queries = 0;
   const assistant = createSalesAssistant({
     db: {
@@ -397,10 +603,14 @@ test('hot context cache coalesces concurrent requests for the same user and site
 
   await Promise.all([
     assistant.answer({ user, body: { message: 'Give me an overview' } }),
+    assistant.answer({ user, body: { message: 'Give me an overview' } }),
+  ]);
+  await Promise.all([
+    assistant.answer({ user, body: { message: 'Aaj mujhe kise call karni chahiye?' } }),
     assistant.answer({ user, body: { message: 'Aaj mujhe kise call karni chahiye?' } }),
   ]);
   await assistant.answer({ user, body: { message: 'Fresh leads dikhao' } });
-  assert.equal(queries, 1);
+  assert.equal(queries, 2);
 });
 
 test('assistant rate limiter is scoped by authenticated user and site', async () => {

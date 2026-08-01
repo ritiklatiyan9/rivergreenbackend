@@ -20,6 +20,26 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_calls_site_start
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_calls_lead_start
   ON calls(lead_id, call_start DESC);
 
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_calls_site_lead_start
+  ON calls(site_id, lead_id, call_start DESC);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_followups_lead_active_scheduled
+  ON followups(lead_id, scheduled_at)
+  WHERE status IN ('PENDING', 'SNOOZED', 'ESCALATED', 'MISSED');
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_client_activities_lead_timeline
+  ON client_activities(lead_id, created_at DESC)
+  WHERE lead_id IS NOT NULL;
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_client_activities_lead_active_scheduled
+  ON client_activities(lead_id, scheduled_at)
+  WHERE status IN ('SCHEDULED', 'IN_PROGRESS');
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_plot_bookings_lead_active
+  ON plot_bookings(lead_id, status)
+  WHERE lead_id IS NOT NULL
+    AND status IN ('ACTIVE', 'COMPLETED', 'PENDING_APPROVAL');
+
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_contacts_site_creator_created
   ON contacts(site_id, created_by, created_at DESC);
 

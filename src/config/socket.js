@@ -132,7 +132,7 @@ export const initSocket = (httpServer, app) => {
 
     // Handle typing indicators
     socket.on('chat:typing', async ({ conversationId, isTyping } = {}) => {
-      if (!UUID_PATTERN.test(String(conversationId || ''))) return;
+      if (!siteId || !UUID_PATTERN.test(String(conversationId || ''))) return;
       try {
         let cached = typingMembershipCache.get(conversationId);
         if (!cached || cached.expiresAt <= Date.now()) {
@@ -141,8 +141,27 @@ export const initSocket = (httpServer, app) => {
              FROM chat_participants sender
              JOIN chat_participants recipients
                ON recipients.conversation_id = sender.conversation_id
-             WHERE sender.conversation_id = $1 AND sender.user_id = $2`,
-            [conversationId, userId],
+             WHERE sender.conversation_id = $1
+               AND sender.user_id = $2
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM chat_participants participant
+                 JOIN users participant_user ON participant_user.id = participant.user_id
+                 WHERE participant.conversation_id = sender.conversation_id
+                   AND participant_user.id != $2
+                   AND NOT (
+                     participant_user.site_id = $3
+                     OR EXISTS (
+                       SELECT 1 FROM user_site_access usa
+                       WHERE usa.user_id = participant_user.id AND usa.site_id = $3
+                     )
+                     OR EXISTS (
+                       SELECT 1 FROM supervisor_site_access ssa
+                       WHERE ssa.supervisor_id = participant_user.id AND ssa.site_id = $3
+                     )
+                   )
+               )`,
+            [conversationId, userId, siteId],
           );
           cached = {
             participantIds: result.rows[0]?.participant_ids || [],

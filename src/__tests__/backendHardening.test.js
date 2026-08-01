@@ -5,7 +5,7 @@ import { EventEmitter } from 'node:events';
 import { cacheMiddleware, normalizeCachePattern } from '../middlewares/cache.middleware.js';
 import { rateLimit, _clearRateLimitBucketsForTests } from '../middlewares/rateLimit.middleware.js';
 import { resolveEffectiveSiteId } from '../middlewares/auth.middleware.js';
-import { actorCanManageSite } from '../controllers/admin.controller.js';
+import { actorCanManageEverySite, actorCanManageSite } from '../controllers/admin.controller.js';
 import callModel from '../models/Call.model.js';
 
 class FakeResponse extends EventEmitter {
@@ -203,4 +203,25 @@ test('admin-panel site mutations cannot cross tenant boundaries', () => {
   assert.equal(actorCanManageSite(owner, { id: 'legacy-site', created_by: null }), false);
   assert.equal(actorCanManageSite(admin, { id: 'site-a', created_by: 'owner-a' }), true);
   assert.equal(actorCanManageSite(admin, { id: 'site-b', created_by: 'owner-a' }), false);
+});
+
+test('bulk site replacement cannot erase another tenant grant', () => {
+  const owner = { id: 'owner-a', role: 'OWNER' };
+  const admin = { id: 'admin-a', role: 'ADMIN', site_id: 'site-a' };
+
+  assert.equal(actorCanManageEverySite(owner, [
+    { id: 'site-a', created_by: 'owner-a' },
+    { id: 'site-b', created_by: 'owner-a' },
+  ]), true);
+  assert.equal(actorCanManageEverySite(owner, [
+    { id: 'site-a', created_by: 'owner-a' },
+    { id: 'site-x', created_by: 'owner-b' },
+  ]), false);
+  assert.equal(actorCanManageEverySite(admin, [
+    { id: 'site-a', created_by: 'owner-a' },
+  ]), true);
+  assert.equal(actorCanManageEverySite(admin, [
+    { id: 'site-a', created_by: 'owner-a' },
+    { id: 'site-b', created_by: 'owner-a' },
+  ]), false);
 });

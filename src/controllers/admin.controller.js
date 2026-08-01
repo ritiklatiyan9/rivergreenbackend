@@ -20,6 +20,10 @@ export const actorCanManageSite = (actor, site) => {
   return false;
 };
 
+export const actorCanManageEverySite = (actor, sites = []) => (
+  Array.isArray(sites) && sites.every((site) => actorCanManageSite(actor, site))
+);
+
 const actorCanManageUser = async (actor, user) => {
   if (!actor || !user || user.role === 'OWNER' || !user.site_id) return false;
   if (actor.role === 'ADMIN') return sameId(user.site_id, actor.site_id);
@@ -417,6 +421,27 @@ export const updateUserSiteAccess = asyncHandler(async (req, res) => {
     return res.status(403).json({ success: false, message: 'You do not have access to this user' });
   }
 
+  // Assignment replacement is all-or-nothing. Refuse it if any existing
+  // grant belongs to another tenant; setUserAssignedSites() must never delete
+  // another owner/admin's access row as a side effect.
+  const existingSitesResult = await pool.query(
+    `SELECT DISTINCT s.id, s.created_by
+     FROM sites s
+     WHERE s.id = $2::uuid
+        OR EXISTS (
+          SELECT 1
+          FROM user_site_access usa
+          WHERE usa.user_id = $1 AND usa.site_id = s.id
+        )`,
+    [id, user.site_id || null],
+  );
+  if (!actorCanManageEverySite(req.user, existingSitesResult.rows)) {
+    return res.status(409).json({
+      success: false,
+      message: 'This user has site access managed by another tenant. Remove or transfer that access first.',
+    });
+  }
+
   const incomingSiteIds = Array.isArray(site_ids)
     ? site_ids
     : (site_id ? [site_id] : []);
@@ -433,7 +458,7 @@ export const updateUserSiteAccess = asyncHandler(async (req, res) => {
     if (sitesResult.rowCount !== normalizedSiteIds.length) {
       return res.status(404).json({ success: false, message: 'Site not found' });
     }
-    if (sitesResult.rows.some((site) => !actorCanManageSite(req.user, site))) {
+    if (!actorCanManageEverySite(req.user, sitesResult.rows)) {
       return res.status(403).json({ success: false, message: 'You do not have access to one or more sites' });
     }
   }
