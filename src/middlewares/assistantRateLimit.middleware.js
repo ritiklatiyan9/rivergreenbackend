@@ -1,5 +1,3 @@
-import redisClient from '../config/redis.js';
-
 const clampLimit = (value, fallback, max) => {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? Math.min(max, Math.max(1, parsed)) : fallback;
@@ -8,14 +6,12 @@ const clampLimit = (value, fallback, max) => {
 const defaultMinuteLimit = clampLimit(process.env.AI_CHAT_RATE_LIMIT_PER_MINUTE, 20, 120);
 const defaultDailyLimit = clampLimit(process.env.AI_CHAT_RATE_LIMIT_PER_DAY, 100, 1000);
 
-const incrementRedisCounter = async (redis, key, ttlSeconds) => {
-  const count = await redis.incr(key);
-  if (count === 1) await redis.expire(key, ttlSeconds);
-  return count;
-};
-
+// In-memory only: one process handles this app's traffic, and per-process
+// limits reset on deploy, which is an acceptable tradeoff for an AI-chat
+// throttle. A prior Redis-backed L2 tier was removed after its endpoint's
+// DNS stopped resolving in production and hung every /ai/chat request behind
+// an un-timed-out redis.incr() call.
 export const createAssistantRateLimiter = ({
-  redis = redisClient,
   minuteLimit = defaultMinuteLimit,
   dailyLimit = defaultDailyLimit,
   now = () => Date.now(),
@@ -55,24 +51,9 @@ export const createAssistantRateLimiter = ({
     const minuteKey = `rate:ai-chat:minute:${scope}:${minuteBucket}`;
     const dayKey = `rate:ai-chat:day:${scope}:${dayBucket}`;
 
-    let minuteCount;
-    let dayCount;
-    if (redis?.isOpen && redis?.isReady) {
-      try {
-        [minuteCount, dayCount] = await Promise.all([
-          incrementRedisCounter(redis, minuteKey, 65),
-          incrementRedisCounter(redis, dayKey, 86_500),
-        ]);
-      } catch (error) {
-        console.error('[AssistantRateLimit] Redis unavailable, using local limiter:', error.message);
-      }
-    }
-
-    if (!Number.isFinite(minuteCount) || !Number.isFinite(dayCount)) {
-      cleanup();
-      minuteCount = localIncrement(minuteKey, (minuteBucket + 1) * 60_000 + 1000);
-      dayCount = localIncrement(dayKey, (dayBucket + 1) * 86_400_000 + 1000);
-    }
+    cleanup();
+    const minuteCount = localIncrement(minuteKey, (minuteBucket + 1) * 60_000 + 1000);
+    const dayCount = localIncrement(dayKey, (dayBucket + 1) * 86_400_000 + 1000);
 
     const minuteRemaining = Math.max(0, minuteLimit - minuteCount);
     const dailyRemaining = Math.max(0, dailyLimit - dayCount);

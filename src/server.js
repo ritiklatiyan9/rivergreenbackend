@@ -3,7 +3,6 @@ import http from 'http';
 
 import app from './app.js';
 import { closeDB, connectDB } from './config/db.js';
-import { closeRedis, connectRedis } from './config/redis.js';
 import { initSocket } from './config/socket.js';
 import { startReminderNudge, stopReminderNudge } from './services/reminderNudge.service.js';
 import { startEodCloser, stopEodCloser } from './services/attendanceEodCloser.service.js';
@@ -24,11 +23,6 @@ connectDB()
   .then(() => {
     server.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);
-    });
-    // Redis is an optional L2 cache: never block API availability if it is
-    // temporarily unavailable, but connect it during normal startup.
-    connectRedis().catch((err) => {
-      console.error('Redis cache unavailable; continuing with memory cache:', err.message);
     });
     // Start the 3-hourly reminder nudge after DB is ready.
     startReminderNudge();
@@ -64,7 +58,7 @@ const shutdown = async (signal, exitCode = 0) => {
 
   server.closeIdleConnections?.();
   await new Promise((resolve) => server.close(resolve));
-  await Promise.allSettled([closeRedis(), closeDB()]);
+  await closeDB();
   clearTimeout(hardExit);
   process.exit(exitCode);
 };

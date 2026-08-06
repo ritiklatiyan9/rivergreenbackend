@@ -1,10 +1,19 @@
 import pool from '../config/db.js';
 import { buildAppMapPrompt, isAllowedRoute } from '../config/appKnowledge.js';
 
-// ponytail: free-tier model; if free capacity disappears, 404 → cooldown →
-// local fallback. Swap to google/gemini-2.5-flash-lite (paid, ~$0.10/M) for
-// higher rate limits and lower latency.
-const DEFAULT_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b:free';
+// ponytail: free OpenRouter models share provider-side capacity and 429/502
+// often (confirmed live: NVIDIA "worker limit reached", Darkbloom "at
+// capacity"). Each request tries these in order and uses the first that
+// responds — all three confirmed via live testing to call tools correctly
+// (unlike the smaller/faster nvidia nano and super variants, which silently
+// skip the tool and would fabricate an answer). Falls back to the verified
+// local answer if every model is unavailable. Swap to a paid model (e.g.
+// google/gemini-2.5-flash-lite, ~$0.10/M) for reliable low-latency service.
+const DEFAULT_MODELS = [
+  'openai/gpt-oss-20b:free',
+  'google/gemma-4-26b-a4b-it:free',
+  'nvidia/nemotron-3-ultra-550b-a55b:free',
+];
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const MAX_MESSAGE_LENGTH = 1500;
 const MAX_HISTORY_ITEMS = 8;
@@ -1446,7 +1455,7 @@ export const extractAgentJson = (value) => {
   return null;
 };
 
-const callOpenRouterChat = async ({ apiKey, body, fetchImpl, deadline, sleep, siteUrl, allowRetry }) => {
+const callOpenRouterOnce = async ({ apiKey, body, fetchImpl, deadline, siteUrl }) => {
   const headers = {
     Authorization: `Bearer ${apiKey}`,
     'Content-Type': 'application/json',
@@ -1455,41 +1464,57 @@ const callOpenRouterChat = async ({ apiKey, body, fetchImpl, deadline, sleep, si
   if (siteUrl) headers['HTTP-Referer'] = siteUrl;
   const options = { method: 'POST', headers, body: JSON.stringify(body) };
 
+  const remainingMs = Math.max(500, deadline - Date.now());
+  const response = await fetchWithTimeout(fetchImpl, OPENROUTER_URL, options, Math.min(8000, remainingMs));
+
+  if (!response.ok) {
+    const isRateLimited = response.status === 429;
+    const isConfigurationError = [400, 401, 403, 404].includes(response.status);
+    // Free-tier capacity errors (408/429/5xx) mean "try the next model", not
+    // "retry this one" — a provider that just returned 429/502 will return
+    // the same error again instantly. Only a config/credential error (bad
+    // key, bad request shape) is worth stopping for immediately.
+    const retryable = !isConfigurationError;
+    throw new OpenRouterRequestError('OpenRouter request failed', {
+      status: response.status,
+      retryable,
+      cooldownMs: isRateLimited
+        ? parseRetryAfterMs(response.headers?.get?.('retry-after'))
+        : (isConfigurationError ? 300_000 : (retryable ? 20_000 : 60_000)),
+    });
+  }
+
+  const declaredLength = Number.parseInt(response.headers?.get?.('content-length') || '0', 10);
+  if (declaredLength > 200_000) throw new OpenRouterRequestError('OpenRouter response is too large', { retryable: true, cooldownMs: 30_000 });
+  const raw = await response.text();
+  if (raw.length > 200_000) throw new OpenRouterRequestError('OpenRouter response is too large', { retryable: true, cooldownMs: 30_000 });
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new OpenRouterRequestError('OpenRouter returned malformed JSON', { retryable: true, cooldownMs: 30_000 });
+  }
+};
+
+// Tries each configured model in turn and returns the first that answers —
+// free models share provider-side capacity and fail independently, so moving
+// to a different provider beats retrying the one that just said "busy".
+const callOpenRouterChat = async ({ apiKey, models, bodyBase, fetchImpl, deadline, sleep, siteUrl }) => {
   let lastError;
-  const attempts = allowRetry ? 2 : 1;
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
+  for (let index = 0; index < models.length; index += 1) {
+    if (Date.now() >= deadline - 500) break;
+    const model = models[index];
     try {
-      const remainingMs = Math.max(500, deadline - Date.now());
-      const response = await fetchWithTimeout(fetchImpl, OPENROUTER_URL, options, Math.min(8000, remainingMs));
-      const retryable = response.status === 408 || response.status === 429 || response.status >= 500;
-      if (!response.ok) {
-        const isRateLimited = response.status === 429;
-        const isConfigurationError = [400, 401, 403, 404].includes(response.status);
-        throw new OpenRouterRequestError('OpenRouter request failed', {
-          status: response.status,
-          retryable: retryable && !isRateLimited,
-          cooldownMs: isRateLimited
-            ? parseRetryAfterMs(response.headers?.get?.('retry-after'))
-            : (isConfigurationError ? 300_000 : (retryable ? 20_000 : 60_000)),
-        });
-      }
-
-      const declaredLength = Number.parseInt(response.headers?.get?.('content-length') || '0', 10);
-      if (declaredLength > 200_000) throw new OpenRouterRequestError('OpenRouter response is too large', { cooldownMs: 30_000 });
-      const raw = await response.text();
-      if (raw.length > 200_000) throw new OpenRouterRequestError('OpenRouter response is too large', { cooldownMs: 30_000 });
-
-      try {
-        return JSON.parse(raw);
-      } catch {
-        throw new OpenRouterRequestError('OpenRouter returned malformed JSON', { cooldownMs: 30_000 });
-      }
+      const data = await callOpenRouterOnce({ apiKey, body: { ...bodyBase, model }, fetchImpl, deadline, siteUrl });
+      return { data, model };
     } catch (error) {
       lastError = error;
-      if (!error?.retryable || attempt === attempts - 1) break;
-      const remainingMs = deadline - Date.now();
-      if (remainingMs <= 600) break;
-      await sleep(Math.min(200, Math.max(50, Math.floor(remainingMs / 10))));
+      if (!error?.retryable) throw error;
+      if (index < models.length - 1) {
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 600) break;
+        await sleep(Math.min(150, Math.max(50, Math.floor(remainingMs / 20))));
+      }
     }
   }
 
@@ -1498,7 +1523,7 @@ const callOpenRouterChat = async ({ apiKey, body, fetchImpl, deadline, sleep, si
 };
 
 const runAgenticAnswer = async ({
-  apiKey, model, message, history, summary, user, db,
+  apiKey, models, message, history, summary, user, db,
   fetchImpl, timeoutMs, sleep, siteUrl, now, logger,
 }) => {
   const deadline = Date.now() + timeoutMs;
@@ -1515,18 +1540,18 @@ const runAgenticAnswer = async ({
   ];
 
   let toolCallsUsed = 0;
-  let retryBudget = true;
+  let resolvedModel;
   for (let round = 0; round < AGENT_MAX_ROUNDS; round += 1) {
-    const parsed = await callOpenRouterChat({
+    const { data: parsed, model } = await callOpenRouterChat({
       apiKey,
-      body: { model, messages, tools: AGENT_TOOL_DEFS, temperature: 0.2, max_tokens: 900 },
+      models,
+      bodyBase: { messages, tools: AGENT_TOOL_DEFS, temperature: 0.2, max_tokens: 900 },
       fetchImpl,
       deadline,
       sleep,
       siteUrl,
-      allowRetry: retryBudget,
     });
-    retryBudget = false;
+    resolvedModel = model;
 
     const assistantMessage = parsed?.choices?.[0]?.message;
     if (!assistantMessage) throw new OpenRouterRequestError('OpenRouter returned an invalid answer', { cooldownMs: 30_000 });
@@ -1571,7 +1596,7 @@ const runAgenticAnswer = async ({
       })
       .slice(0, MAX_CARDS);
     const suggestions = asArray(parsedFinal?.suggestions).map((s) => safeText(s, 80)).filter(Boolean).slice(0, 3);
-    return { answer, actions, cards, suggestions, toolCallsUsed };
+    return { answer, actions, cards, suggestions, toolCallsUsed, model: resolvedModel };
   }
 
   throw new OpenRouterRequestError('Agent exceeded its round budget', { cooldownMs: 20_000 });
@@ -1665,7 +1690,10 @@ export const createSalesAssistant = ({
       let source = 'database';
       let resolvedModel;
       const apiKey = normalizeWhitespace(env.OPENROUTER_API_KEY);
-      const model = normalizeWhitespace(env.OPENROUTER_MODEL) || DEFAULT_MODEL;
+      const configuredModels = normalizeWhitespace(env.OPENROUTER_MODEL);
+      const models = configuredModels
+        ? configuredModels.split(',').map((entry) => entry.trim()).filter(Boolean)
+        : DEFAULT_MODELS;
 
       const timestamp = now().getTime();
       // Direct person/phone lookups stay entirely on our server for speed and
@@ -1676,7 +1704,7 @@ export const createSalesAssistant = ({
         try {
           const agentic = await runAgenticAnswer({
             apiKey,
-            model,
+            models,
             message,
             history,
             summary: context.summary,
@@ -1694,7 +1722,7 @@ export const createSalesAssistant = ({
           actions = agentic.actions;
           if (agentic.suggestions.length) suggestions = agentic.suggestions;
           source = 'agentic';
-          resolvedModel = model;
+          resolvedModel = agentic.model;
           providerCooldownUntil = 0;
         } catch (error) {
           if (error?.cooldownMs) {

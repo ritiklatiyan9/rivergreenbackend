@@ -13,7 +13,6 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.490.0",
     "bcrypt": "^6.0.0",
-    "bullmq": "^5.70.0",
     "cloudinary": "^2.9.0",
     "compression": "^1.8.1",
     "cookie-parser": "^1.4.6",
@@ -28,7 +27,6 @@
     "node-zklib": "^1.1.10",
     "pg": "^8.11.3",
     "razorpay": "^2.9.6",
-    "redis": "^5.11.0",
     "socket.io": "^4.8.3",
     "xlsx": "^0.18.5"
   },

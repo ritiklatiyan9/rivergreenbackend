@@ -1,9 +1,10 @@
-import redisClient from '../config/redis.js';
 import { createHash } from 'crypto';
 
-// ─── L1: In-Process Memory Cache ─────────────────────────────────────────────
-// Sub-millisecond reads for hot keys before falling back to Redis.
-// Keys are evicted when the TTL expires or on explicit bust.
+// ─── In-Process Memory Cache ─────────────────────────────────────────────
+// Sub-millisecond reads for hot keys. Keys are evicted when the TTL expires
+// or on explicit bust. A prior Redis L2 tier was removed after its endpoint's
+// DNS stopped resolving in production and calls to it blocked requests with
+// no timeout — this app runs as a single process, so L1 alone is correct.
 
 function globToRegex(glob) {
     const escaped = glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
@@ -54,23 +55,14 @@ const COALESCE_WAIT_MS = 5_000;
 const normalizeTtl = (value) => Math.min(Math.max(Number(value) || 300, 1), 3_600);
 
 // Legacy controllers used cache:*:/api/... before site scoping was added to
-// keys. Expand those patterns explicitly so both L1 and Redis invalidations
-// remain correct for cache:{user}:{site}:{url}.
+// keys. Expand those patterns explicitly so L1 invalidation remains correct
+// for cache:{user}:{site}:{url}.
 export const normalizeCachePattern = (pattern) => {
     const value = String(pattern || '');
     return value.startsWith('cache:*:/api/')
         ? value.replace('cache:*:/api/', 'cache:*:*:/api/')
         : value;
 };
-
-const waitForFlight = (promise) => new Promise((resolve) => {
-    const timeout = setTimeout(() => resolve(null), COALESCE_WAIT_MS);
-    timeout.unref?.();
-    promise.then((value) => {
-        clearTimeout(timeout);
-        resolve(value);
-    });
-});
 
 const cacheUrlPart = (originalUrl) => {
     const [pathname, rawQuery = ''] = String(originalUrl || '').split('?', 2);
@@ -83,18 +75,12 @@ const cacheUrlPart = (originalUrl) => {
 
 // ─── Cache Middleware ────────────────────────────────────────────────────────
 /**
- * Two-tier GET cache middleware.
- *   Tier 1 – in-process MemCache  (~0 ms, evicted by TTL or explicit bust)
- *   Tier 2 – Redis                (~1-2 ms, survives restarts)
- *
- * Cache key = cache:{userId}:{originalUrl}
+ * In-process GET cache middleware, ~0 ms reads, evicted by TTL or explicit bust.
+ * Cache key = cache:{userId}:{siteId}:{originalUrl}
  * @param {number} ttl  TTL in seconds (default 300 = 5 min)
  */
 export const cacheMiddleware = (ttl = 300) => {
     const resolvedTtl = normalizeTtl(ttl);
-    // L1 TTL is capped at 120 s so L2 Redis remains authoritative
-    const l1Ttl = Math.min(resolvedTtl, 120);
-    const isRedisAvailable = () => redisClient?.isOpen && redisClient?.isReady;
 
     return async (req, res, next) => {
         if (req.method !== 'GET') return next();
@@ -110,26 +96,10 @@ export const cacheMiddleware = (ttl = 300) => {
 
         const cacheKey = `cache:${userId}:${effectiveSiteId}:${cacheUrlPart(req.originalUrl)}`;
 
-        // Tier-1: memory hit
-        const l1 = memCache.get(cacheKey);
-        if (l1 !== undefined) {
-            res.setHeader('X-Cache', 'L1');
-            return res.json(l1);
-        }
-
-        // Tier-2: Redis hit
-        if (isRedisAvailable()) {
-            try {
-                const cached = await redisClient.get(cacheKey);
-                if (cached) {
-                    const parsed = JSON.parse(cached);
-                    memCache.set(cacheKey, parsed, l1Ttl);  // promote to L1
-                    res.setHeader('X-Cache', 'L2');
-                    return res.json(parsed);
-                }
-            } catch (err) {
-                console.error('[Cache] Redis read error:', err.message);
-            }
+        const hit = memCache.get(cacheKey);
+        if (hit !== undefined) {
+            res.setHeader('X-Cache', 'HIT');
+            return res.json(hit);
         }
 
         // Prevent a burst of identical cold requests from all hitting the DB.
@@ -159,7 +129,7 @@ export const cacheMiddleware = (ttl = 300) => {
         res.once('finish', () => settle({ cacheable: false }));
         res.once('close', () => settle({ cacheable: false }));
 
-        // Cache miss → intercept res.json to populate both tiers
+        // Cache miss → intercept res.json to populate the cache
         const originalJson = res.json.bind(res);
         res.json = (body) => {
             const cacheable = res.statusCode >= 200
@@ -172,13 +142,7 @@ export const cacheMiddleware = (ttl = 300) => {
                 settle({ cacheable: false });
                 return originalJson(body);
             }
-            if (isRedisAvailable()) {
-                const serialized = JSON.stringify(body);
-                redisClient
-                    .setEx(cacheKey, resolvedTtl, serialized)
-                    .catch((err) => console.error('[Cache] Redis write error:', err.message));
-            }
-            memCache.set(cacheKey, body, l1Ttl);
+            memCache.set(cacheKey, body, resolvedTtl);
             res.setHeader('X-Cache', 'MISS');
             settle({ cacheable: true, body });
             return originalJson(body);
@@ -188,28 +152,24 @@ export const cacheMiddleware = (ttl = 300) => {
     };
 };
 
+const waitForFlight = (promise) => new Promise((resolve) => {
+    const timeout = setTimeout(() => resolve(null), COALESCE_WAIT_MS);
+    timeout.unref?.();
+    promise.then((value) => {
+        clearTimeout(timeout);
+        resolve(value);
+    });
+});
+
 // ─── Cache Busting ───────────────────────────────────────────────────────────
 /**
- * Bust all cache keys matching a Redis glob pattern.
- * Clears both the L1 in-process cache and L2 Redis (via cursor SCAN).
+ * Bust all cache keys matching a glob pattern.
  * Fire-and-forget safe — never throws.
  *
  * @param {string} pattern  e.g. 'cache:*:/api/leads*'
  */
 export const bustCache = async (pattern) => {
-    const normalizedPattern = normalizeCachePattern(pattern);
-    // Always clear L1 synchronously
-    memCache.deleteByPattern(normalizedPattern);
-    if (!(redisClient?.isOpen && redisClient?.isReady)) return;
-    // Clear L2 Redis via the cursor-safe async iterator (never KEYS).
-    try {
-        for await (const batch of redisClient.scanIterator({ MATCH: normalizedPattern, COUNT: 200 })) {
-            const keys = Array.isArray(batch) ? batch : [batch];
-            if (keys.length > 0) await redisClient.del(keys);
-        }
-    } catch (err) {
-        console.error('[Cache] Redis bust error:', err.message);
-    }
+    memCache.deleteByPattern(normalizeCachePattern(pattern));
 };
 
 /**

@@ -514,7 +514,47 @@ test('agentic loop answers app how-to questions with validated navigation action
   assert.match(result.answer, /Import tab/);
 });
 
-test('provider rate limits fall back immediately and open a cooldown circuit', async () => {
+test('a busy model falls through to the next configured model within the same request', async () => {
+  const requestedModels = [];
+  const assistant = createSalesAssistant({
+    db: makeDb(contextFixture()),
+    env: { OPENROUTER_API_KEY: 'server-secret', OPENROUTER_MODEL: 'busy-model:free,backup-model:free' },
+    now: fixedNow,
+    sleep: async () => {},
+    fetchImpl: async (_url, options) => {
+      const { model } = JSON.parse(options.body);
+      requestedModels.push(model);
+      if (model === 'busy-model:free') {
+        return {
+          ok: false,
+          status: 502,
+          headers: { get: () => null },
+          text: async () => JSON.stringify({ error: { message: 'at capacity' } }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        text: async () => JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({ answer: 'Backup model answered.', actions: [], lead_ids: [], suggestions: [] }) } }],
+        }),
+      };
+    },
+  });
+
+  const result = await assistant.answer({ user, body: { message: 'Give me a sales overview' } });
+  assert.deepEqual(requestedModels, ['busy-model:free', 'backup-model:free']);
+  assert.equal(result.meta.source, 'agentic');
+  assert.equal(result.meta.model, 'backup-model:free');
+  assert.match(result.answer, /Backup model answered/);
+});
+
+test('provider rate limits cascade across every configured free model, then open a cooldown circuit', async () => {
+  // Free models share provider-side capacity independently — a 429 from one
+  // doesn't mean the others are also down, so the server tries all of them
+  // (env has no OPENROUTER_MODEL, so the 3-model DEFAULT_MODELS list applies)
+  // before falling back to the verified local answer.
   let calls = 0;
   const assistant = createSalesAssistant({
     db: makeDb(contextFixture()),
@@ -534,17 +574,17 @@ test('provider rate limits fall back immediately and open a cooldown circuit', a
   });
 
   const result = await assistant.answer({ user, body: { message: 'Show my follow-ups' } });
-  assert.equal(calls, 1);
+  assert.equal(calls, 3);
   assert.equal(result.meta.source, 'database');
   assert.equal(result.cards.length, 1);
   assert.match(result.answer, /due today/i);
 
   const duringCooldown = await assistant.answer({ user, body: { message: 'Show my follow-ups' } });
   assert.equal(duringCooldown.meta.source, 'database');
-  assert.equal(calls, 1);
+  assert.equal(calls, 3);
 });
 
-test('provider 5xx retries once within the latency budget then opens a cooldown', async () => {
+test('provider 5xx cascades across configured models within the latency budget, then opens a cooldown', async () => {
   let calls = 0;
   const assistant = createSalesAssistant({
     db: makeDb(contextFixture()),
@@ -564,9 +604,9 @@ test('provider 5xx retries once within the latency budget then opens a cooldown'
   });
 
   assert.equal((await assistant.answer({ user, body: { message: 'Give me a sales overview' } })).meta.source, 'database');
-  assert.equal(calls, 2);
+  assert.equal(calls, 3);
   assert.equal((await assistant.answer({ user, body: { message: 'Give me a sales overview' } })).meta.source, 'database');
-  assert.equal(calls, 2);
+  assert.equal(calls, 3);
 });
 
 test('provider auth and malformed responses open a cooldown without leaking details', async () => {

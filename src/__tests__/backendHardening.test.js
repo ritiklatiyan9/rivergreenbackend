@@ -75,7 +75,7 @@ test('cache key trusts the auth-resolved site, not a forged raw header', async (
 
   assert.equal(nextCalled, false);
   assert.deepEqual(secondResponse.body, { success: true, value: 42 });
-  assert.equal(secondResponse.getHeader('x-cache'), 'L1');
+  assert.equal(secondResponse.getHeader('x-cache'), 'HIT');
 });
 
 test('identical cache misses are coalesced into one downstream request', async () => {
