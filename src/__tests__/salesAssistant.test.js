@@ -320,6 +320,25 @@ test('prioritized call reasons include grounded timeline evidence', async () => 
   assert.match(result.cards[0].reason, /requested callback today/i);
 });
 
+test('priority cards suppress CRM placeholder text instead of presenting it as communication', async () => {
+  const context = weightedPriorityFixture();
+  context.followups = [{
+    ...context.followups.find((item) => item.id === 'prime-interested'),
+    timelineEvidence: '',
+    latestCustomerNotes: 'NA',
+    latestFollowupNote: 'N/A',
+  }];
+  const assistant = createSalesAssistant({ db: makeDb(context), env: {}, now: fixedNow });
+
+  const result = await assistant.answer({
+    user,
+    body: { message: 'Mujhe top 1 log do jinhe call karni chahiye' },
+  });
+
+  assert.equal(result.cards[0].latestCommunication, undefined);
+  assert.doesNotMatch(result.cards[0].reason, /(?:^|\s)N\/?A(?:\s|$)/i);
+});
+
 test('prioritized-call context and cache remain isolated by current site and user', async () => {
   const seenScopes = [];
   const db = {
@@ -387,22 +406,47 @@ test('priority SQL prefilters candidates and reads one coherent latest timeline 
   });
 });
 
-test('OpenRouter receives only safe aggregate context and cannot author cards', async () => {
-  let requestBody;
+test('agentic loop: model calls tools, phones stay server-side, cards come from lead_ids', async () => {
+  const requestBodies = [];
   const assistant = createSalesAssistant({
     db: makeDb(contextFixture()),
-    env: { OPENROUTER_API_KEY: 'server-secret', OPENROUTER_MODEL: 'openrouter/free' },
+    env: { OPENROUTER_API_KEY: 'server-secret', OPENROUTER_MODEL: 'test-model' },
     now: fixedNow,
     fetchImpl: async (_url, options) => {
       assert.equal(options.headers.Authorization, 'Bearer server-secret');
-      requestBody = options.body;
+      requestBodies.push(options.body);
+      const payload = requestBodies.length === 1
+        ? {
+          choices: [{
+            message: {
+              tool_calls: [{
+                id: 'tool-1',
+                type: 'function',
+                function: { name: 'get_priority_leads', arguments: '{"limit":5}' },
+              }],
+            },
+          }],
+        }
+        : {
+          choices: [{
+            message: {
+              content: JSON.stringify({
+                answer: 'Aman ko sabse pehle call karein — HOT lead aur follow-up overdue hai.',
+                actions: [
+                  { label: 'Scheduled Calls', route: '/calls/scheduled' },
+                  { label: 'Evil', route: 'https://evil.example.com/x' },
+                ],
+                lead_ids: ['lead-1'],
+                suggestions: ['Overdue follow-ups dikhao'],
+              }),
+            },
+          }],
+        };
       return {
         ok: true,
         status: 200,
         headers: { get: () => null },
-        text: async () => JSON.stringify({
-          choices: [{ message: { content: 'Start with the verified priority cards below.' } }],
-        }),
+        text: async () => JSON.stringify(payload),
       };
     },
   });
@@ -412,10 +456,62 @@ test('OpenRouter receives only safe aggregate context and cannot author cards', 
     body: { message: 'Who should I call first?' },
   });
 
-  assert.equal(result.meta.source, 'openrouter+database');
-  assert.equal(result.meta.model, 'openrouter/free');
+  assert.equal(requestBodies.length, 2);
+  // The question and tool schemas go to the provider; phone numbers and the key never do.
+  assert.match(requestBodies[0], /Who should I call first/);
+  assert.match(requestBodies[0], /get_priority_leads/);
+  for (const body of requestBodies) {
+    assert.doesNotMatch(body, /99999 11111|8888811111/);
+  }
+  assert.equal(result.meta.source, 'agentic');
+  assert.equal(result.meta.model, 'test-model');
+  assert.match(result.answer, /Aman ko sabse pehle/);
+  assert.equal(result.cards.length, 1);
+  assert.equal(result.cards[0].leadId, 'lead-1');
   assert.equal(result.cards[0].phone, '+91 99999 11111');
-  assert.doesNotMatch(requestBody, /99999 11111|Aman Test|server-secret|Who should I call first/);
+  assert.deepEqual(result.actions, [{ label: 'Scheduled Calls', route: '/calls/scheduled' }]);
+  assert.deepEqual(result.suggestions, ['Overdue follow-ups dikhao']);
+});
+
+test('agentic loop answers app how-to questions with validated navigation actions', async () => {
+  let firstBody;
+  const assistant = createSalesAssistant({
+    db: makeDb(contextFixture()),
+    env: { OPENROUTER_API_KEY: 'server-secret' },
+    now: fixedNow,
+    fetchImpl: async (_url, options) => {
+      firstBody = firstBody || options.body;
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        text: async () => JSON.stringify({
+          choices: [{
+            message: {
+              content: JSON.stringify({
+                answer: 'Leads section mein Import tab kholiye, template download karke bharein, phir Excel file upload kar dijiye.',
+                actions: [{ label: 'Import Leads', route: '/leads/bulk' }],
+                lead_ids: [],
+                suggestions: ['Template mein kaunse columns hain?'],
+              }),
+            },
+          }],
+        }),
+      };
+    },
+  });
+
+  const result = await assistant.answer({
+    user,
+    body: { message: 'mujhe excel sheet import krni hai kaise kru' },
+  });
+
+  // The app map rides in the system prompt, so no tool round-trip is needed.
+  assert.match(firstBody, /\/leads\/bulk/);
+  assert.equal(result.meta.source, 'agentic');
+  assert.deepEqual(result.actions, [{ label: 'Import Leads', route: '/leads/bulk' }]);
+  assert.deepEqual(result.cards, []);
+  assert.match(result.answer, /Import tab/);
 });
 
 test('provider rate limits fall back immediately and open a cooldown circuit', async () => {
