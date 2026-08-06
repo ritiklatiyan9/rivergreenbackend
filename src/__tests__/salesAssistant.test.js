@@ -406,7 +406,7 @@ test('priority SQL prefilters candidates and reads one coherent latest timeline 
   });
 });
 
-test('agentic loop: model calls tools, phones stay server-side, cards come from lead_ids', async () => {
+test('agentic loop: model calls tools, phones stay server-side, cards come from tool results', async () => {
   const requestBodies = [];
   const assistant = createSalesAssistant({
     db: makeDb(contextFixture()),
@@ -429,17 +429,8 @@ test('agentic loop: model calls tools, phones stay server-side, cards come from 
         }
         : {
           choices: [{
-            message: {
-              content: JSON.stringify({
-                answer: 'Aman ko sabse pehle call karein — HOT lead aur follow-up overdue hai.',
-                actions: [
-                  { label: 'Scheduled Calls', route: '/calls/scheduled' },
-                  { label: 'Evil', route: 'https://evil.example.com/x' },
-                ],
-                lead_ids: ['lead-1'],
-                suggestions: ['Overdue follow-ups dikhao'],
-              }),
-            },
+            // Plain prose is the contract — small free models fail strict JSON.
+            message: { content: 'Aman ko sabse pehle call karein — HOT lead hai aur follow-up overdue hai.' },
           }],
         };
       return {
@@ -466,11 +457,11 @@ test('agentic loop: model calls tools, phones stay server-side, cards come from 
   assert.equal(result.meta.source, 'agentic');
   assert.equal(result.meta.model, 'test-model');
   assert.match(result.answer, /Aman ko sabse pehle/);
-  assert.equal(result.cards.length, 1);
+  // Cards come from what the tool returned, not from anything the model wrote,
+  // so every ranked lead the tool surfaced is offered as a tap-to-call card.
+  assert.equal(result.cards.length, 2);
   assert.equal(result.cards[0].leadId, 'lead-1');
   assert.equal(result.cards[0].phone, '+91 99999 11111');
-  assert.deepEqual(result.actions, [{ label: 'Scheduled Calls', route: '/calls/scheduled' }]);
-  assert.deepEqual(result.suggestions, ['Overdue follow-ups dikhao']);
 });
 
 test('agentic loop answers app how-to questions with validated navigation actions', async () => {
@@ -488,12 +479,7 @@ test('agentic loop answers app how-to questions with validated navigation action
         text: async () => JSON.stringify({
           choices: [{
             message: {
-              content: JSON.stringify({
-                answer: 'Leads section mein Import tab kholiye, template download karke bharein, phir Excel file upload kar dijiye.',
-                actions: [{ label: 'Import Leads', route: '/leads/bulk' }],
-                lead_ids: [],
-                suggestions: ['Template mein kaunse columns hain?'],
-              }),
+              content: 'Leads section mein Import tab kholiye, template download karke bharein, phir Excel file upload kar dijiye.',
             },
           }],
         }),
@@ -506,12 +492,70 @@ test('agentic loop answers app how-to questions with validated navigation action
     body: { message: 'mujhe excel sheet import krni hai kaise kru' },
   });
 
-  // The app map rides in the system prompt, so no tool round-trip is needed.
+  // The app map rides in the system prompt, so no tool round-trip is needed,
+  // and the button is derived from the question rather than from model output.
   assert.match(firstBody, /\/leads\/bulk/);
   assert.equal(result.meta.source, 'agentic');
   assert.deepEqual(result.actions, [{ label: 'Import Leads', route: '/leads/bulk' }]);
   assert.deepEqual(result.cards, []);
   assert.match(result.answer, /Import tab/);
+});
+
+test('app how-to questions are answered without the AI provider at all', async () => {
+  // The free tier caps daily requests, so the assistant must still guide users
+  // through app features when no model is reachable.
+  let providerCalled = false;
+  const assistant = createSalesAssistant({
+    db: makeDb(contextFixture()),
+    env: {},
+    now: fixedNow,
+    fetchImpl: async () => { providerCalled = true; },
+  });
+
+  const result = await assistant.answer({ user, body: { message: 'mujhe excel sheet import krni hai kaise kru' } });
+  assert.equal(providerCalled, false);
+  assert.equal(result.meta.source, 'app-guide');
+  assert.match(result.answer, /Import tab/);
+  assert.match(result.answer, /Download Template/);
+  assert.deepEqual(result.actions, [{ label: 'Import Leads', route: '/leads/bulk' }]);
+  // A how-to answer must not attach unrelated call cards.
+  assert.deepEqual(result.cards, []);
+});
+
+test('data questions still get their buttons when the provider is unavailable', async () => {
+  const assistant = createSalesAssistant({
+    db: makeDb(contextFixture()),
+    env: {},
+    now: fixedNow,
+  });
+
+  const result = await assistant.answer({ user, body: { message: 'overdue follow ups dikhao' } });
+  assert.equal(result.meta.source, 'database');
+  assert.deepEqual(result.actions, [{ label: 'Missed Follow-ups', route: '/calls/missed-followups' }]);
+  assert.ok(result.cards.length > 0);
+});
+
+test('navigation buttons survive a model that ignores every formatting rule', async () => {
+  // The real failure mode on free models: prose wrapped in markdown, no JSON.
+  // The answer must still land and the button must still be correct.
+  const assistant = createSalesAssistant({
+    db: makeDb(contextFixture()),
+    env: { OPENROUTER_API_KEY: 'server-secret', OPENROUTER_MODEL: 'sloppy-model:free' },
+    now: fixedNow,
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      text: async () => JSON.stringify({
+        choices: [{ message: { content: 'Attendance mark karne ke liye Attendance screen kholiye aur check in dabaiye.' } }],
+      }),
+    }),
+  });
+
+  const result = await assistant.answer({ user, body: { message: 'attendance kaise lagau?' } });
+  assert.equal(result.meta.source, 'agentic');
+  assert.match(result.answer, /Attendance screen/);
+  assert.deepEqual(result.actions, [{ label: 'Mark Attendance', route: '/attendance' }]);
 });
 
 test('a busy model falls through to the next configured model within the same request', async () => {

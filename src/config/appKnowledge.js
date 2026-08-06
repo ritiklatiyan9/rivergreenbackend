@@ -64,3 +64,50 @@ export const isAllowedRoute = (route) => {
 export const buildAppMapPrompt = () => APP_FEATURES
   .map((f) => `${f.route} | ${f.title} | ${f.how}`)
   .join('\n');
+
+// Navigation buttons are picked here, not by the model. Small free models call
+// tools reliably but fail a strict JSON contract, which used to sink the whole
+// answer — deriving the destination from the question keeps buttons working no
+// matter which model served the request. First match wins, so the list runs
+// specific → generic. Patterns cover the Hinglish agents actually type.
+const ACTION_RULES = [
+  { match: /\b(import|excel|xlsx|sheet|csv|bulk\s*upload)\b/i, label: 'Import Leads', route: '/leads/bulk' },
+  { match: /\b(add|naya|nayi|new)\b.{0,12}\blead\b|\blead\b.{0,12}\b(add|banao|jodo)\b/i, label: 'Add Lead', route: '/leads/add' },
+  { match: /\b(assign|batwara|transfer)\b.{0,12}\blead\b|\blead\b.{0,12}\bassign\b/i, label: 'Assign Leads', route: '/leads/assign' },
+  { match: /\b(overdue|missed|chhut|chhoot)\b.{0,16}\b(follow|call)/i, label: 'Missed Follow-ups', route: '/calls/missed-followups' },
+  { match: /\b(follow[\s-]?up|schedule|reminder|appointment|due)\b/i, label: 'Scheduled Calls', route: '/calls/scheduled' },
+  { match: /\b(analytic|report|performance|kitni\s*call|connect\s*rate)\b/i, label: 'Call Analytics', route: '/calls/analytics' },
+  { match: /\b(dial|dialer|calling\s*start|call\s*(karni|karna|karu|karun))\b/i, label: 'Open Dialer', route: '/calls/dialer' },
+  { match: /\b(attendance|hazri|haziri|check[\s-]?in|check[\s-]?out)\b/i, label: 'Mark Attendance', route: '/attendance' },
+  { match: /\b(booking|booked|plot\s*book)\b/i, label: 'Bookings', route: '/bookings' },
+  { match: /\b(payment|installment|collection|paisa|bhugtan)\b/i, label: 'Sales & Payments', route: '/sales' },
+  { match: /\b(task|kaam)\b/i, label: 'Tasks', route: '/supervision-tasks' },
+  { match: /\b(map|plot|colony)\b/i, label: 'Colony Maps', route: '/colony-maps' },
+  { match: /\b(contact|phonebook)\b/i, label: 'Contacts', route: '/all-contacts' },
+  { match: /\b(chat|message)\b/i, label: 'Team Chat', route: '/chat' },
+  { match: /\b(fresh|nayi\s*lead|naye\s*lead|uncalled)\b/i, label: 'Fresh Leads', route: '/leads?status=NEW&from=fresh' },
+  { match: /\blead|customer|pipeline\b/i, label: 'View Leads', route: '/leads' },
+];
+
+export const suggestActions = (message) => {
+  const text = String(message ?? '');
+  const rule = ACTION_RULES.find((candidate) => candidate.match.test(text));
+  // Route check still applies even though the table is ours: it catches a typo
+  // here before the app tries to navigate somewhere that does not exist.
+  return rule && isAllowedRoute(rule.route) ? [{ label: rule.label, route: rule.route }] : [];
+};
+
+const HOWTO_PATTERN = /\b(kaise|kese|kaisay|kaeise|kahan|kaha|kidhar|how|where|steps?|tarika|tarike|process)\b/i;
+
+// "How do I import an Excel sheet" needs the app map, not a language model.
+// Answering it here keeps the assistant useful when the AI provider is rate
+// limited or down, instead of falling through to an unrelated data summary.
+export const answerHowTo = (message) => {
+  const text = String(message ?? '');
+  if (!HOWTO_PATTERN.test(text)) return null;
+  const [action] = suggestActions(text);
+  if (!action) return null;
+  const base = action.route.split('?')[0];
+  const feature = APP_FEATURES.find((candidate) => candidate.route.split('?')[0] === base);
+  return feature ? { how: feature.how, title: feature.title } : null;
+};
