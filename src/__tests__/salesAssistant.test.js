@@ -429,8 +429,7 @@ test('agentic loop: model calls tools, phones stay server-side, cards come from 
         }
         : {
           choices: [{
-            // Plain prose is the contract — small free models fail strict JSON.
-            message: { content: 'Aman ko sabse pehle call karein — HOT lead hai aur follow-up overdue hai.' },
+            message: { content: '**Aman ko sabse pehle call karein**\n\n- HOT lead\n- Follow-up overdue hai' },
           }],
         };
       return {
@@ -457,6 +456,7 @@ test('agentic loop: model calls tools, phones stay server-side, cards come from 
   assert.equal(result.meta.source, 'agentic');
   assert.equal(result.meta.model, 'test-model');
   assert.match(result.answer, /Aman ko sabse pehle/);
+  assert.match(result.answer, /\n- HOT lead/);
   // Cards come from what the tool returned, not from anything the model wrote,
   // so every ranked lead the tool surfaced is offered as a tap-to-call card.
   assert.equal(result.cards.length, 2);
