@@ -7,8 +7,9 @@ const runSeeder = async () => {
     const userModel = (await import('./src/models/User.model.js')).default;
 
     console.log("Seeding an OWNER account...");
-    const email = 'admin@example.com';
-    const password = 'password123';
+    // Usage: node seed_admin.js [email] [password]
+    const email = process.argv[2] || 'admin@example.com';
+    const password = process.argv[3] || 'password123';
 
     // Check if exists
     const existing = await userModel.findByEmail(email, pool);
