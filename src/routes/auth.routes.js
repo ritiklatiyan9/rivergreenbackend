@@ -4,6 +4,7 @@ const router = express.Router();
 import {
 	registerOwner,
 	login,
+	googleLogin,
 	refresh,
 	logout,
 	getMe,
@@ -39,6 +40,7 @@ const ownerRegistrationLimiter = rateLimit({
 
 router.post('/register-owner', ownerRegistrationLimiter, registerOwner);
 router.post('/login', loginLimiter, login);
+router.post('/google', loginLimiter, googleLogin);
 router.post('/refresh', refreshLimiter, refresh);
 router.post('/logout', authMiddleware, logout);
 router.get('/me', authMiddleware, getMe);

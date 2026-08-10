@@ -5,7 +5,8 @@ import siteModel from '../models/Site.model.js';
 import pool from '../config/db.js';
 import { uploadSingle } from '../utils/upload.js';
 import { ensureUserSiteAccessTable, getUserAssignedSiteIds } from '../utils/userSiteAccess.js';
-import fcmService from '../services/fcm.service.js';
+import admin from 'firebase-admin';
+import fcmService, { getFirebaseApp } from '../services/fcm.service.js';
 import { bustCache } from '../middlewares/cache.middleware.js';
 import { timingSafeEqual } from 'crypto';
 
@@ -154,6 +155,12 @@ export const login = asyncHandler(async (req, res) => {
     return res.status(401).json({ success: false, message: 'Invalid credentials' });
   }
 
+  await issueSession(user, res);
+});
+
+// Shared by password and Google login: mint the access/refresh pair, persist
+// the hashed refresh token and reply with the session payload.
+const issueSession = async (user, res) => {
   const newVersion = user.token_version || 1;
   if (!user.token_version) {
     await userModel.update(user.id, { token_version: newVersion }, pool);
@@ -172,6 +179,43 @@ export const login = asyncHandler(async (req, res) => {
 
   res.cookie('refreshToken', refreshToken, REFRESH_COOKIE_OPTIONS);
   res.json({ success: true, user: sanitizeUser(user), accessToken, refreshToken });
+};
+
+// Google Sign-In (Firebase). The app sends a Firebase ID token; we verify it
+// with the same Firebase project used for FCM, then sign in the account
+// already registered under that Google email. No self-signup on this path.
+export const googleLogin = asyncHandler(async (req, res) => {
+  const { idToken } = req.body;
+  if (!idToken) {
+    return res.status(400).json({ success: false, message: 'idToken is required' });
+  }
+
+  const app = getFirebaseApp();
+  if (!app) {
+    return res.status(503).json({ success: false, message: 'Google sign-in is not configured on the server' });
+  }
+
+  let decoded;
+  try {
+    decoded = await admin.auth(app).verifyIdToken(idToken);
+  } catch {
+    return res.status(401).json({ success: false, message: 'Invalid Google sign-in token' });
+  }
+
+  const email = String(decoded.email || '').trim().toLowerCase();
+  if (!email || decoded.email_verified === false) {
+    return res.status(401).json({ success: false, message: 'Your Google account email is not verified' });
+  }
+
+  const user = await userModel.findByEmail(email, pool);
+  if (!user) {
+    return res.status(401).json({ success: false, message: 'No account is registered with this Google email. Use your registered email or contact your administrator.' });
+  }
+  if (!user.is_active) {
+    return res.status(403).json({ success: false, message: 'Account is disabled. Contact administrator.' });
+  }
+
+  await issueSession(user, res);
 });
 
 // In-flight refresh lock per user — prevents token-version race when two

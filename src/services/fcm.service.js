@@ -63,6 +63,10 @@ const init = () => {
   }
 };
 
+// Shared Firebase Admin app — also used by auth for Google sign-in token
+// verification, so the service account is configured in exactly one place.
+export const getFirebaseApp = init;
+
 // ── Token storage helpers ─────────────────────────────────────────────────
 // Lazy-create the table on first touch so deploys don't need a separate
 // migration step (same pattern as ensureUserSiteAccessTable).
