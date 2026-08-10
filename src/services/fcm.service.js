@@ -4,19 +4,39 @@ import path from 'path';
 import pool from '../config/db.js';
 
 // ── Firebase Admin bootstrap ──────────────────────────────────────────────
-// Supports three config styles (choose whichever is easiest on deploy):
+// Supports four config styles (choose whichever is easiest on deploy):
 //   1. FIREBASE_SERVICE_ACCOUNT_JSON  — full JSON string pasted into env
-//   2. GOOGLE_APPLICATION_CREDENTIALS — absolute path to the JSON file
-//   3. File at ./firebase-service-account.json relative to process.cwd()
+//   2. FIREBASE_SERVICE_ACCOUNT_B64   — same JSON, base64 encoded
+//   3. GOOGLE_APPLICATION_CREDENTIALS — absolute path to the JSON file
+//   4. File at ./firebase-service-account.json relative to process.cwd()
+//
+// Prefer (2) on hosts whose env editor re-escapes backslashes: base64 has no
+// backslashes, quotes or newlines to mangle.
 let _app = null;
 let _initTried = false;
 let _initError = null;
 
+// A dashboard paste box that escapes backslashes turns the PEM's \n into the
+// two literal characters \ and n, which OpenSSL rejects with
+// "DECODER routines::unsupported". Restoring real newlines is a no-op on a
+// correctly stored key, so it is always safe to run.
+const normalizeCreds = (creds) => {
+  if (creds && typeof creds.private_key === 'string') {
+    creds.private_key = creds.private_key.replace(/\\n/g, '\n');
+  }
+  return creds;
+};
+
 const tryParseInline = () => {
-  const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  const raw = (process.env.FIREBASE_SERVICE_ACCOUNT_JSON || process.env.FIREBASE_SERVICE_ACCOUNT_B64 || '').trim();
   if (!raw) return null;
-  try { return JSON.parse(raw); }
-  catch (e) { _initError = new Error(`FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON: ${e.message}`); return null; }
+  // Strip wrapping quotes a dashboard may have added around the whole value.
+  const unquoted = raw.replace(/^(['"])([\s\S]*)\1$/, '$2').trim();
+  const text = unquoted.startsWith('{')
+    ? unquoted
+    : Buffer.from(unquoted, 'base64').toString('utf8');
+  try { return normalizeCreds(JSON.parse(text)); }
+  catch (e) { _initError = new Error(`Firebase service account env var is not valid JSON: ${e.message}`); return null; }
 };
 
 const tryReadFile = () => {
@@ -30,7 +50,7 @@ const tryReadFile = () => {
     try {
       if (fs.existsSync(file)) {
         const raw = fs.readFileSync(file, 'utf8');
-        return JSON.parse(raw);
+        return normalizeCreds(JSON.parse(raw));
       }
     } catch (e) {
       _initError = new Error(`Failed to read Firebase credentials at ${file}: ${e.message}`);
@@ -66,6 +86,9 @@ const init = () => {
 // Shared Firebase Admin app — also used by auth for Google sign-in token
 // verification, so the service account is configured in exactly one place.
 export const getFirebaseApp = init;
+
+// Exposed for scripts/test-firebase-creds.mjs.
+export const parseServiceAccountForTest = tryParseInline;
 
 // ── Token storage helpers ─────────────────────────────────────────────────
 // Lazy-create the table on first touch so deploys don't need a separate
