@@ -1232,7 +1232,7 @@ export const publicUploadScreenshots = asyncHandler(async (req, res) => {
 //
 // Issues an HMAC-SHA256 signed token using the PLT receipt type. The token
 // is verifiable on https://defencegarden.com/verify-receipt?token=… via the
-// existing /api/payments/verify-receipt endpoint, since both endpoints share
+// existing /api/payments/verify-receipt endpoint. Each system retains its own
 // RECEIPT_VERIFY_SECRET. Short keys (t, i, pn, a, …) match the contract the
 // VerifyReceipt page already understands — no frontend changes are needed
 // on defencegarden.com to support this new receipt type.
@@ -1287,7 +1287,7 @@ const buildSignedReceiptForBooking = async (bookingId) => {
     .digest('hex');
 
   const token = Buffer.from(JSON.stringify({ p: payload, s: sig })).toString('base64url');
-  const verifyBase = (process.env.RECEIPT_VERIFY_URL || 'https://www.defencegarden.com/verify-receipt').replace(/\/+$/, '');
+  const verifyBase = (process.env.RECEIPT_VERIFY_URL || 'https://defencegarden.com/verify-receipt').replace(/\/+$/, '');
   const verifyUrl = `${verifyBase}?token=${token}`;
 
   return { booking, payments, summary, token, verifyUrl, receiptNo, payload };

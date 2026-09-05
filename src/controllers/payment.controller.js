@@ -1,4 +1,3 @@
-import crypto from 'crypto';
 import asyncHandler from '../utils/asyncHandler.js';
 import paymentModel from '../models/Payment.model.js';
 import plotBookingModel from '../models/PlotBooking.model.js';
@@ -7,6 +6,7 @@ import userModel from '../models/User.model.js';
 import pool from '../config/db.js';
 import { bustCache } from '../middlewares/cache.middleware.js';
 import fcmService from '../services/fcm.service.js';
+import { verifyReceiptAcrossSystems } from '../utils/receiptVerification.js';
 
 // Fire-and-forget FCM helper. Notifies the agents tied to a booking that a
 // payment activity happened. Runs after the response so HTTP isn't blocked.
@@ -37,39 +37,17 @@ const fmtINR = (n) => {
 
 /**
  * GET /api/payments/verify-receipt?token=...
- * Public endpoint — verifies an HMAC-signed farmer payment receipt token
- * issued by the Account system. Uses a shared RECEIPT_VERIFY_SECRET.
+ * Public endpoint used by defencegarden.com. Booking receipts are verified
+ * locally; Accounts receipts are securely delegated to the Accounts backend,
+ * which owns their signing secret.
  */
-export const verifyReceiptToken = (req, res) => {
-  try {
-    const { token } = req.query;
-    if (!token) {
-      return res.status(400).json({ valid: false, message: 'Missing token' });
-    }
-
-    const decoded = JSON.parse(Buffer.from(String(token), 'base64url').toString('utf8'));
-    const payload = decoded?.p;
-    const sig = decoded?.s;
-    if (!payload || !sig) {
-      return res.status(400).json({ valid: false, message: 'Malformed token' });
-    }
-
-    const expectedSig = crypto
-      .createHmac('sha256', process.env.RECEIPT_VERIFY_SECRET || '')
-      .update(JSON.stringify(payload))
-      .digest('hex');
-
-    const sigBuf = Buffer.from(sig, 'hex');
-    const expBuf = Buffer.from(expectedSig, 'hex');
-    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
-      return res.status(400).json({ valid: false, message: 'Invalid or tampered receipt' });
-    }
-
-    return res.json({ valid: true, receipt: payload });
-  } catch (err) {
-    return res.status(400).json({ valid: false, message: 'Malformed token' });
+export const verifyReceiptToken = asyncHandler(async (req, res) => {
+  const result = await verifyReceiptAcrossSystems(req.query?.token);
+  if (!result.valid) {
+    return res.status(result.status || 400).json({ valid: false, message: result.message });
   }
-};
+  return res.json({ valid: true, receipt: result.receipt });
+});
 
 const getSiteId = async (userId, reqUser) => {
   if (reqUser && reqUser.site_id) return reqUser.site_id;

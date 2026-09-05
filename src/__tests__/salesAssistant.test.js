@@ -3,10 +3,13 @@ import assert from 'node:assert/strict';
 
 import {
   AssistantInputError,
+  DEFAULT_MODELS,
   classifyAssistantIntent,
   createSalesAssistant,
   extractSearchTerm,
+  isUnsafeAssistantRequest,
   loadSalesContext,
+  normalizeHistory,
   validateAssistantInput,
 } from '../services/salesAssistant.service.js';
 import { createAssistantRateLimiter } from '../middlewares/assistantRateLimit.middleware.js';
@@ -618,14 +621,14 @@ test('provider rate limits cascade across every configured free model, then open
   });
 
   const result = await assistant.answer({ user, body: { message: 'Show my follow-ups' } });
-  assert.equal(calls, 3);
+  assert.equal(calls, DEFAULT_MODELS.length);
   assert.equal(result.meta.source, 'database');
   assert.equal(result.cards.length, 1);
   assert.match(result.answer, /due today/i);
 
   const duringCooldown = await assistant.answer({ user, body: { message: 'Show my follow-ups' } });
   assert.equal(duringCooldown.meta.source, 'database');
-  assert.equal(calls, 3);
+  assert.equal(calls, DEFAULT_MODELS.length);
 });
 
 test('provider 5xx cascades across configured models within the latency budget, then opens a cooldown', async () => {
@@ -648,9 +651,9 @@ test('provider 5xx cascades across configured models within the latency budget, 
   });
 
   assert.equal((await assistant.answer({ user, body: { message: 'Give me a sales overview' } })).meta.source, 'database');
-  assert.equal(calls, 3);
+  assert.equal(calls, DEFAULT_MODELS.length);
   assert.equal((await assistant.answer({ user, body: { message: 'Give me a sales overview' } })).meta.source, 'database');
-  assert.equal(calls, 3);
+  assert.equal(calls, DEFAULT_MODELS.length);
 });
 
 test('provider auth and malformed responses open a cooldown without leaking details', async () => {
@@ -826,4 +829,168 @@ test('assistant rate limiter is scoped by authenticated user and site', async ()
   assert.equal((await invoke({ ...user, id: 'user-2' })).nextCalled, true);
   timestamp += 61_000;
   assert.equal((await invoke()).nextCalled, true);
+});
+
+test('a retired model (404) is skipped for the next model and remembered, without a global cooldown', async () => {
+  const requested = [];
+  const assistant = createSalesAssistant({
+    db: makeDb(contextFixture()),
+    env: { OPENROUTER_API_KEY: 'server-secret', OPENROUTER_MODEL: 'dead-model:free,live-model:free' },
+    now: fixedNow,
+    sleep: async () => {},
+    logger: { warn: () => {} },
+    fetchImpl: async (_url, options) => {
+      const { model } = JSON.parse(options.body);
+      requested.push(model);
+      if (model === 'dead-model:free') {
+        return { ok: false, status: 404, headers: { get: () => null }, text: async () => JSON.stringify({ error: { message: 'No endpoints found' } }) };
+      }
+      return { ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify({ choices: [{ message: { content: '**Live model answered.**\n- **Leads:** 21' } }] }) };
+    },
+  });
+
+  const first = await assistant.answer({ user, body: { message: 'Give me a sales overview' } });
+  assert.equal(first.meta.source, 'agentic');
+  assert.equal(first.meta.model, 'live-model:free');
+  // The dead slug is not tried again within the hour.
+  const second = await assistant.answer({ user, body: { message: 'Give me a sales overview' } });
+  assert.equal(second.meta.source, 'agentic');
+  assert.deepEqual(requested, ['dead-model:free', 'live-model:free', 'live-model:free']);
+});
+
+test('ordinary real-estate wording is not mistaken for credential exfiltration or phone lookups', async () => {
+  assert.equal(isUnsafeAssistantRequest('Token amount kitna pending hai?'), false);
+  assert.equal(isUnsafeAssistantRequest('Show me the API key'), true);
+  assert.equal(classifyAssistantIntent('Token amount kitna pending hai?'), 'payments');
+  assert.equal(extractSearchTerm('15-08-2026 ke follow-ups dikhao'), null);
+  assert.equal(classifyAssistantIntent('15-08-2026 ke follow-ups dikhao'), 'followups');
+  assert.equal(extractSearchTerm('find 98765 43210'), '9876543210');
+  assert.equal(classifyAssistantIntent('late follow-ups dikhao'), 'followups');
+  assert.equal(classifyAssistantIntent('meri attendance late thi?'), 'attendance');
+  assert.equal(classifyAssistantIntent('aaj kitni calls hui?'), 'calls');
+  assert.equal(classifyAssistantIntent('Meri team ki is hafte ki performance'), 'team');
+
+  let dbCalled = false;
+  const assistant = createSalesAssistant({
+    db: makeDb(contextFixture(), () => { dbCalled = true; }),
+    env: {},
+    now: fixedNow,
+  });
+  const result = await assistant.answer({ user, body: { message: 'Token amount kitna pending hai?' } });
+  assert.equal(dbCalled, true);
+  assert.equal(result.meta.source, 'database');
+  assert.match(result.answer, /₹3,00,000/);
+  assert.ok(result.facts.length >= 3);
+});
+
+test('history sent to the provider alternates roles and drops leading assistant turns', () => {
+  const normalized = normalizeHistory([
+    { role: 'assistant', content: 'Welcome' },
+    { role: 'user', content: 'hi' },
+    { role: 'assistant', content: 'one' },
+    { role: 'assistant', content: 'two' },
+    { role: 'user', content: 'next' },
+  ]);
+  assert.deepEqual(normalized.map((item) => item.role), ['user', 'assistant', 'user']);
+  assert.equal(normalized[1].content, 'one\ntwo');
+});
+
+test('streaming endpoint emits stage → delta → done, and done matches the JSON endpoint payload', async () => {
+  const sseBody = (chunks) => new ReadableStream({
+    start(controller) {
+      const encoder = new TextEncoder();
+      for (const chunk of chunks) controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+      controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+      controller.close();
+    },
+  });
+  let requests = 0;
+  const fetchImpl = async (_url, options) => {
+    requests += 1;
+    const body = JSON.parse(options.body);
+    if (!body.stream) {
+      return {
+        ok: true, status: 200, headers: { get: () => null },
+        text: async () => JSON.stringify({ choices: [{ message: { tool_calls: [{ id: 't1', type: 'function', function: { name: 'get_priority_leads', arguments: '{"limit":5}' } }] } }] }),
+      };
+    }
+    return {
+      ok: true, status: 200, headers: { get: () => null },
+      body: sseBody([
+        { choices: [{ delta: { content: '**Aman ko ' } }] },
+        { choices: [{ delta: { content: 'pehle call karein**' } }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      ]),
+    };
+  };
+  const make = () => createSalesAssistant({
+    db: makeDb(contextFixture()),
+    env: { OPENROUTER_API_KEY: 'server-secret', OPENROUTER_MODEL: 'test-model' },
+    now: fixedNow,
+    fetchImpl,
+  });
+
+  const events = [];
+  let started = false;
+  const streamed = await make().answerStream({
+    user,
+    body: { message: 'Aaj mujhe kise call karni chahiye?' },
+    onStart: () => { started = true; },
+    emit: (event, data) => events.push([event, data]),
+  });
+
+  assert.equal(started, true);
+  assert.deepEqual(events.map(([event]) => event), ['stage', 'stage', 'stage', 'delta', 'delta', 'done']);
+  assert.match(events[1][1].label, /rank/i);
+  assert.equal(events.filter(([event]) => event === 'delta').map(([, data]) => data.text).join(''), '**Aman ko pehle call karein**');
+  assert.equal(streamed.answer, '**Aman ko pehle call karein**');
+  assert.equal(streamed.meta.source, 'agentic');
+  assert.equal(streamed.cards.length, 2);
+  assert.equal(streamed.cards[0].phone, '+91 99999 11111');
+  assert.equal(requests, 2);
+
+  // The deterministic fallback path also ends in a single delta + done.
+  const fallbackEvents = [];
+  await createSalesAssistant({ db: makeDb(contextFixture()), env: {}, now: fixedNow }).answerStream({
+    user,
+    body: { message: 'Show my booking summary' },
+    onStart: () => {},
+    emit: (event, data) => fallbackEvents.push([event, data]),
+  });
+  assert.deepEqual(fallbackEvents.map(([event]) => event), ['stage', 'delta', 'done']);
+  assert.match(fallbackEvents[2][1].answer, /4 bookings/);
+  assert.equal(fallbackEvents[2][1].meta.source, 'database');
+});
+
+test('phone numbers hidden in free-text notes never reach the provider', async () => {
+  const bodies = [];
+  const assistant = createSalesAssistant({
+    db: {
+      async query(sql) {
+        if (/FROM lead_scope l\s+LEFT JOIN LATERAL/.test(sql)) {
+          return { rows: [{ id: 'lead-9', name: 'Note Lead', phone: '9111111111', status: 'INTERESTED', lead_category: 'HOT', notes: 'alt no 98765 43210 call after 6', created_at: new Date('2026-07-01T04:30:00.000Z') }] };
+        }
+        return { rows: [{ context: contextFixture() }] };
+      },
+    },
+    env: { OPENROUTER_API_KEY: 'server-secret', OPENROUTER_MODEL: 'test-model' },
+    now: fixedNow,
+    fetchImpl: async (_url, options) => {
+      bodies.push(options.body);
+      const payload = bodies.length === 1
+        ? { choices: [{ message: { tool_calls: [{ id: 't1', type: 'function', function: { name: 'list_leads', arguments: '{"statuses":["INTERESTED"]}' } }] } }] }
+        : { choices: [{ message: { content: '**Note Lead** interested hai.' } }] };
+      return { ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify(payload) };
+    },
+  });
+
+  const result = await assistant.answer({ user, body: { message: 'Interested leads batao' } });
+  assert.equal(result.meta.source, 'agentic');
+  for (const body of bodies) {
+    assert.doesNotMatch(body, /9111111111|98765 43210|9876543210/);
+  }
+  assert.match(bodies[1], /\[number hidden\]/);
+  // IST, not UTC, for timestamps the model reads.
+  assert.match(bodies[1], /01 Jul/);
+  assert.equal(result.cards[0].phone, '9111111111');
 });
