@@ -6,20 +6,10 @@ import userModel from '../models/User.model.js';
 import { testConnection, fetchDeviceUsers } from '../services/zkteco.service.js';
 import * as poller from '../workers/zktecoPoller.worker.js';
 
-const toDateKey = (d) => {
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd}`;
-};
-
-const isPunchLate = (punchTime, officeStart) => {
-  if (!officeStart) return false;
-  const [h, m] = String(officeStart).split(':').map(Number);
-  const cutoff = new Date(punchTime);
-  cutoff.setHours(h, m || 0, 0, 0);
-  return punchTime > cutoff;
-};
+import { __test__ as punchDates } from '../utils/zktecoPunchReducer.js';
+import { emitAttendancePunch } from '../config/socket.js';
+const toDateKey = punchDates.toDateKey;
+const isPunchLate = punchDates.isLate;
 
 /** GET /api/attendance/zkteco/devices — status of every configured device */
 export const listDevices = asyncHandler(async (req, res) => {
@@ -35,6 +25,7 @@ export const listDevices = asyncHandler(async (req, res) => {
       port: l.zkteco_port,
       device_id: l.zkteco_device_id,
       serial: l.zkteco_serial,
+      punch_mode: l.zkteco_punch_mode || 'AUTO',
       last_synced_at: l.zkteco_last_synced_at,
       last_log_id: l.zkteco_last_log_id,
       last_error: l.zkteco_last_error,
@@ -63,7 +54,7 @@ export const syncDevice = asyncHandler(async (req, res) => {
   try {
     const result = await poller.syncNow(locationId);
     bustCache('cache:*:/api/attendance*');
-    res.json({ success: true, ...result });
+    res.json({ success: result.ok, ...result });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
   }
@@ -147,7 +138,7 @@ export const mapUser = asyncHandler(async (req, res) => {
   if (zkteco_user_id != null) {
     const zkId = parseInt(zkteco_user_id, 10);
     const { rows: unmapped } = await pool.query(
-      `SELECT up.*, al.office_start_time, al.site_id as loc_site_id
+      `SELECT up.*, al.office_start_time, al.office_end_time, al.site_id as loc_site_id
        FROM zkteco_unmapped_punches up
        JOIN attendance_locations al ON up.location_id = al.id
        WHERE up.zkteco_user_id = $1 AND up.resolved = false
@@ -157,11 +148,12 @@ export const mapUser = asyncHandler(async (req, res) => {
     for (const punch of unmapped) {
       const punchTime = new Date(punch.punch_time);
       try {
-        await attendanceRecordModel.appendBiometricPunch(
+        const record = await attendanceRecordModel.appendBiometricPunch(
           {
             userId: user_id,
             locationId: punch.location_id,
-            dateKey: toDateKey(punchTime),
+            dateKey: toDateKey(punchTime, punch),
+            punchType: punch.punch_type,
             punchTime,
             status: isPunchLate(punchTime, punch.office_start_time) ? 'LATE' : 'PRESENT',
             isSecondary: !!(updated.primary_site_id
@@ -172,19 +164,16 @@ export const mapUser = asyncHandler(async (req, res) => {
           },
           pool,
         );
+        await pool.query('UPDATE zkteco_unmapped_punches SET resolved = true WHERE id = $1', [punch.id]);
+        if (record) emitAttendancePunch(record);
         backfilled++;
       } catch { /* skip individual punch failures */ }
     }
-    if (backfilled > 0) {
-      await pool.query(
-        `UPDATE zkteco_unmapped_punches SET resolved = true
-         WHERE zkteco_user_id = $1 AND resolved = false`,
-        [zkId],
-      );
-    }
+
   }
 
   bustCache('cache:*:/api/attendance*');
+  bustCache('cache:*:/api/hr*');
   res.json({ success: true, user: updated, backfilled });
 });
 

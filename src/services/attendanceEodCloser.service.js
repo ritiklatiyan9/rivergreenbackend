@@ -168,6 +168,12 @@ const tick = async () => {
 };
 
 export const startEodCloser = () => {
+  // Payroll needs real session boundaries. Keep missing checkouts reviewable
+  // unless an installation explicitly opts into the legacy synthetic close.
+  if (process.env.ATTENDANCE_AUTO_CLOSE_ENABLED !== 'true') {
+    log('automatic checkout disabled; unclosed sessions remain available for review');
+    return;
+  }
   if (_intervalHandle) return;
   _intervalHandle = setInterval(() => {
     tick().catch((e) => errlog('tick failed:', e?.message || e));

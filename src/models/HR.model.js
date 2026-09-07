@@ -59,7 +59,26 @@ class UserSalaryModel extends MasterModel {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      const startDate = effectiveFrom || new Date().toISOString().slice(0, 10);
+      const startDate = effectiveFrom || new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+      // Lock the user even when no salary exists yet to serialize first writes.
+      await client.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [userId]);
+      const active = await client.query(`SELECT *, effective_from::text AS start_date FROM ${this.tableName}
+        WHERE user_id = $1 AND effective_to IS NULL FOR UPDATE`, [userId]);
+      const current = active.rows[0];
+      if (current && startDate < current.start_date) {
+        const error = new Error('Effective date cannot precede the current salary. Choose its effective date or a later date.');
+        error.statusCode = 409;
+        throw error;
+      }
+      // A correction on the same effective day replaces that version, avoiding
+      // negative date ranges. Later revisions retain the prior version.
+      if (current && startDate === current.start_date) {
+        const result = await client.query(`UPDATE ${this.tableName}
+          SET monthly_salary = $1, joined_at = $2, notes = $3, created_by = $4
+          WHERE id = $5 RETURNING *`, [monthlySalary, joinedAt || null, notes || null, createdBy || null, current.id]);
+        await client.query('COMMIT');
+        return result.rows[0];
+      }
 
       // Close currently active row (if any) the day before the new one starts.
       await client.query(

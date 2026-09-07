@@ -58,6 +58,7 @@ const excelUpload = multer({
 
 import upload from '../middlewares/multer.middleware.js';
 import { cacheMiddleware } from '../middlewares/cache.middleware.js';
+import { leadInsights, clientInsights } from '../controllers/leadInsights.controller.js';
 
 // ── All routes require auth ──────────────────────────────────────────────────
 router.use(authMiddleware);
@@ -67,6 +68,7 @@ router.post('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR'
 router.get('/', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(120), getLeads);
 
 // Static routes BEFORE :id
+router.get('/analytics', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(30), leadInsights);
 router.get('/counts', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(60), getLeadStatusCounts);
 router.get('/matter', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(60), getMatterLeadsList);
 router.get('/assignable-users', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(300), getAssignableUsers);
@@ -88,6 +90,7 @@ router.patch(
 );
 
 // Single lead routes
+router.get('/:id/insights', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(30), clientInsights);
 router.get('/:id/full', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(120), getLeadFullDetails);
 router.get('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(120), getLead);
 router.put('/:id', checkRole(['AGENT', 'TEAM_HEAD', 'ADMIN', 'OWNER', 'SUPERVISOR']), upload.single('photo'), updateLead);
@@ -110,4 +113,3 @@ router.get(
 );
 
 export default router;
-

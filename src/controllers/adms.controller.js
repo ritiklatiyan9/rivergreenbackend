@@ -1,3 +1,4 @@
+import { __test__ as punchDates } from '../utils/zktecoPunchReducer.js';
 // ZKTeco ADMS / Push SDK endpoints.
 //
 // The device speaks plain HTTP:
@@ -139,13 +140,7 @@ export const pushData = asyncHandler(async (req, res) => {
   // for that day (open new session vs close current). Pull-mode poller
   // continues to use the old reducer path.
   const tzOffsetMin = parseInt(process.env.ZKTECO_TZ_OFFSET_MINUTES || '330', 10);
-  const toDateKey = (d) => {
-    const local = new Date(d.getTime() + tzOffsetMin * 60_000);
-    const yyyy = local.getUTCFullYear();
-    const mm = String(local.getUTCMonth() + 1).padStart(2, '0');
-    const dd = String(local.getUTCDate()).padStart(2, '0');
-    return `${yyyy}-${mm}-${dd}`;
-  };
+  const toDateKey = d => punchDates.toDateKey(d, location);
   const isLate = (d, officeStart) => {
     if (!officeStart) return false;
     const [h, m] = String(officeStart).split(':').map(Number);
@@ -154,9 +149,9 @@ export const pushData = asyncHandler(async (req, res) => {
     return punchMinutes > h * 60 + (m || 0);
   };
 
-  let applied = 0;
+  let applied = 0, failures = 0;
   const unmappedToInsert = [];
-  for (const punch of rows) {
+  for (const punch of [...rows].sort((a, b) => a.time - b.time)) {
     const user = userMap.get(punch.zktecoUserId);
     if (!user) {
       unmappedToInsert.push(punch);
@@ -187,6 +182,7 @@ export const pushData = asyncHandler(async (req, res) => {
         notifyAttendancePunch(record, { channel: 'BIOMETRIC_PUSH' });
       }
     } catch (err) {
+      failures++;
       errlog(`append failed user=${user.id} punch=${punch.time?.toISOString()}: ${err.message}`);
     }
   }
@@ -206,14 +202,17 @@ export const pushData = asyncHandler(async (req, res) => {
         values,
       );
     } catch (err) {
+      failures++;
       errlog(`unmapped insert failed: ${err.message}`);
     }
   }
 
-  await updateHeartbeat(location.id, { error: null });
+  await updateHeartbeat(location.id, { error: failures ? `${failures} writes failed; retry required` : null });
   if (applied > 0) bustCache('cache:*:/api/attendance*').catch(() => null);
 
-  sendText(res, 200, `OK: ${applied}`);
+  if (applied > 0) bustCache('cache:*:/api/hr*').catch(() => null);
+  if (failures) return sendText(res, 503, 'RETRY');
+  sendText(res, 200, `OK: ${rows.length}`);
 });
 
 /**

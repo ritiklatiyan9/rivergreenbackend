@@ -53,11 +53,11 @@ router.get('/locations', checkRole(['ADMIN', 'OWNER']), cacheMiddleware(300), ge
 router.post('/locations', checkRole(['ADMIN', 'OWNER']), createLocation);
 router.put('/locations/:id', checkRole(['ADMIN', 'OWNER']), updateLocation);
 router.delete('/locations/:id', checkRole(['ADMIN', 'OWNER']), deleteLocation);
-router.get('/records', checkRole(['ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(60), getAllRecords);
+router.get('/records', checkRole(['ADMIN', 'OWNER', 'SUPERVISOR']), getAllRecords);
 router.get('/stats', checkRole(['ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(60), getDailyStats);
 router.get('/users', checkRole(['ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(300), getAttendanceUsers);
 router.get('/user/:userId', checkRole(['ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(120), getUserAttendance);
-router.get('/user-movement/:userId', checkRole(['ADMIN', 'OWNER', 'SUPERVISOR']), cacheMiddleware(30), getUserMovement);
+router.get('/user-movement/:userId', checkRole(['ADMIN', 'OWNER', 'SUPERVISOR']), getUserMovement);
 router.get('/live-locations', checkRole(['ADMIN', 'OWNER', 'SUPERVISOR']), getLiveLocations);
 
 // ── Analytics ──

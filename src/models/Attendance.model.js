@@ -1,5 +1,5 @@
 import MasterModel from './MasterModel.js';
-import { appendPunchToSessions, denormalizeSessions } from '../utils/sessionAppend.js';
+import { rebuildSessions } from '../utils/sessionAppend.js';
 
 class AttendanceLocationModel extends MasterModel {
   constructor() {
@@ -101,7 +101,7 @@ class AttendanceRecordModel extends MasterModel {
       FROM ${this.tableName} ar
       JOIN attendance_locations al ON ar.location_id = al.id
       WHERE ${where}
-      ORDER BY ar.date DESC, ar.check_in_time DESC
+      ORDER BY ar.date DESC, ar.check_in_time DESC, ar.id DESC
       LIMIT $${paramIdx} OFFSET $${paramIdx + 1}
     `, [...params, limit, offset]);
 
@@ -115,7 +115,7 @@ class AttendanceRecordModel extends MasterModel {
   }
 
   /** Admin: get all attendance records with user info */
-  async findAllRecords({ page = 1, limit = 20, date, startDate, endDate, userId, locationId, status } = {}, pool) {
+  async findAllRecords({ page = 1, limit = 20, date, startDate, endDate, userId, locationId, status, search } = {}, pool) {
     const offset = (page - 1) * limit;
     let where = '1=1';
     const params = [];
@@ -152,26 +152,42 @@ class AttendanceRecordModel extends MasterModel {
       paramIdx++;
     }
 
-    const countResult = await pool.query(
-      `SELECT COUNT(*) FROM ${this.tableName} ar WHERE ${where}`, params
-    );
+    if (search?.trim()) {
+      params.push(`%${search.trim().replace(/[\\%_]/g, '\\$&')}%`);
+      where += ` AND (u.name ILIKE $${paramIdx} OR u.email ILIKE $${paramIdx} OR al.name ILIKE $${paramIdx})`;
+      paramIdx++;
+    }
+    const joins = `FROM ${this.tableName} ar
+      JOIN users u ON ar.user_id = u.id
+      JOIN attendance_locations al ON ar.location_id = al.id`;
+    const countResult = await pool.query(`SELECT COUNT(*),
+      COUNT(*) FILTER (WHERE ar.status = 'PRESENT') AS present,
+      COUNT(*) FILTER (WHERE ar.status = 'LATE') AS late,
+      COUNT(*) FILTER (WHERE ar.status = 'HALF_DAY') AS half_day,
+      COUNT(*) FILTER (WHERE ar.check_in_time IS NOT NULL AND (
+        CASE WHEN jsonb_array_length(COALESCE(ar.sessions, '[]'::jsonb)) > 0
+          THEN (ar.sessions -> -1 ->> 'out') IS NULL
+          ELSE ar.check_out_time IS NULL END)
+        AND (ar.date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date OR (ar.date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date - 1 AND al.office_end_time < al.office_start_time AND (NOW() AT TIME ZONE 'Asia/Kolkata')::time <= al.office_end_time))) AS active
+      ${joins} WHERE ${where}`, params);
 
     const result = await pool.query(`
-      SELECT ar.*,
+      SELECT ar.*, ar.date::text AS date,
              u.name as user_name, u.email as user_email, u.phone as user_phone, u.profile_photo,
              u.primary_site_id, u.zkteco_user_id,
              al.name as location_name, al.latitude as loc_lat, al.longitude as loc_lng, al.radius_meters,
-             al.site_id as location_site_id
+             al.site_id as location_site_id, al.office_start_time, al.office_end_time
       FROM ${this.tableName} ar
       JOIN users u ON ar.user_id = u.id
       JOIN attendance_locations al ON ar.location_id = al.id
       WHERE ${where}
-      ORDER BY ar.date DESC, ar.check_in_time DESC
+      ORDER BY ar.date DESC, ar.check_in_time DESC, ar.id DESC
       LIMIT $${paramIdx} OFFSET $${paramIdx + 1}
     `, [...params, limit, offset]);
 
     return {
       records: result.rows,
+      summary: countResult.rows[0],
       total: parseInt(countResult.rows[0].count),
       page,
       limit,
@@ -195,90 +211,68 @@ class AttendanceRecordModel extends MasterModel {
   }
 
   /**
-   * Append one biometric punch to the day's session timeline.
-   *
-   * The day's `sessions` JSONB array is the source of truth — it stores
-   * every distinct in/out as { in, out } pairs so multiple visits per day
-   * can be reconstructed exactly. `check_in_time` and `check_out_time` are
-   * denormalized first-in / last-completed-out for backward-compatible
-   * queries.
-   *
-   * Alternation logic:
-   *   - No sessions yet, or last session is closed (has `out`)  → start new
-   *     session with `in = punchTime`, `out = null`.
-   *   - Last session is open (`out` is null) and punchTime is later than
-   *     `last.in` → close it (`out = punchTime`).
-   *   - Out-of-order punch (earlier than open `in`) → push as new earlier
-   *     session and re-sort. Rare, but keeps history intact.
-   *
-   * Debounce: any new punch within `debounceMs` of an existing in/out is
-   * dropped (treated as a duplicate scan).
-   *
-   * Wrapped in a transaction with SELECT ... FOR UPDATE so concurrent
-   * punches at the same instant don't lose each other.
+   * Persist each scan once and rebuild the day's sessions from ordered events.
+   * Shared by cloud push, polling and mapping backfill. The transaction lock
+   * also serializes concurrent first scans, and legacy boundaries are seeded
+   * once so existing attendance is not discarded during the transition.
    */
   async appendBiometricPunch(
     { userId, locationId, dateKey, punchTime, punchType, status, isSecondary, source, raw },
     pool,
     opts = {},
   ) {
-    const debounceMs = opts.debounceMs ?? 10_000;
-    const tn = this.tableName;
+    if (!(punchTime instanceof Date) || !Number.isFinite(punchTime.getTime())) throw new Error('Invalid punch timestamp');
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-
-      const existing = await client.query(
-        `SELECT id, sessions FROM ${tn}
-         WHERE user_id = $1 AND location_id = $2 AND date = $3
-         FOR UPDATE`,
-        [userId, locationId, dateKey],
-      );
-
-      const { sessions, changed } = appendPunchToSessions(
-        existing.rows[0]?.sessions,
-        punchTime,
-        { debounceMs, punchType },
-      );
-      if (!changed) {
-        await client.query('COMMIT');
-        return null;
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+        [JSON.stringify([String(userId), String(locationId), dateKey])]);
+      const existing = await client.query(`SELECT id, sessions, check_in_time, check_out_time FROM ${this.tableName}
+        WHERE user_id = $1 AND location_id = $2 AND date = $3 FOR UPDATE`, [userId, locationId, dateKey]);
+      const events = await client.query(`SELECT punch_time, punch_type, raw FROM attendance_punch_events
+        WHERE user_id = $1 AND location_id = $2 AND attendance_date = $3 ORDER BY punch_time`, [userId, locationId, dateKey]);
+      // Preserve valid legacy punches on the first journal-backed update.
+      if (!events.rows.length && existing.rows[0]) {
+        const old = existing.rows[0];
+        const sessions = old.sessions?.length ? old.sessions : [{ in: old.check_in_time, out: old.check_out_time }];
+        for (const session of sessions) {
+          for (const [time, type] of [[session.in, 0], [session.auto_closed ? null : session.out, 1]]) {
+            if (!time) continue;
+            await client.query(`INSERT INTO attendance_punch_events (user_id, location_id, attendance_date, punch_time, punch_type, raw)
+              VALUES ($1,$2,$3,$4,$5,'{"seeded":true}') ON CONFLICT (user_id, location_id, punch_time) DO NOTHING`, [userId, locationId, dateKey, time, type]);
+          }
+        }
       }
-      const { firstIn, lastOut } = denormalizeSessions(sessions);
-
-      let result;
-      if (existing.rows.length === 0) {
-        result = await client.query(
-          `INSERT INTO ${tn}
-            (user_id, location_id, date, check_in_time, check_out_time, status, is_secondary, source, raw_zkteco, sessions)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-           RETURNING *`,
-          [userId, locationId, dateKey, firstIn, lastOut, status, isSecondary, source, raw, JSON.stringify(sessions)],
-        );
-      } else {
-        result = await client.query(
-          `UPDATE ${tn} SET
-             check_in_time = $1,
-             check_out_time = $2,
-             sessions = $3,
-             status = CASE WHEN status = 'LATE' OR $4 = 'LATE' THEN 'LATE' ELSE status END,
-             is_secondary = $5,
-             source = $6,
-             raw_zkteco = $7,
-             updated_at = NOW()
-           WHERE id = $8 RETURNING *`,
-          [firstIn, lastOut, JSON.stringify(sessions), status, isSecondary, source, raw, existing.rows[0].id],
-        );
+      const inserted = await client.query(`INSERT INTO attendance_punch_events (user_id, location_id, attendance_date, punch_time, punch_type, raw)
+        VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (user_id, location_id, punch_time) DO NOTHING RETURNING id`,
+        [userId, locationId, dateKey, punchTime, punchType ?? null, raw || {}]);
+      if (!inserted.rows.length && events.rows.length) { await client.query('COMMIT'); return null; }
+      const journal = await client.query(`SELECT punch_time, punch_type, raw FROM attendance_punch_events
+        WHERE user_id = $1 AND location_id = $2 AND attendance_date = $3 ORDER BY punch_time`, [userId, locationId, dateKey]);
+      const location = await client.query('SELECT zkteco_punch_mode, office_start_time FROM attendance_locations WHERE id = $1', [locationId]);
+      const sessions = rebuildSessions(journal.rows, { mode: location.rows[0]?.zkteco_punch_mode || 'AUTO', ...opts });
+      if (existing.rows[0] && JSON.stringify(existing.rows[0].sessions) === JSON.stringify(sessions)) { await client.query('COMMIT'); return null; }
+      const firstIn = sessions.find(s => s.in)?.in || null;
+      const lastOut = sessions.at(-1)?.out || null;
+      const officeStart = location.rows[0]?.office_start_time;
+      let dayStatus = status;
+      if (firstIn && officeStart) {
+        const local = new Date(Date.parse(firstIn) + Number(process.env.ZKTECO_TZ_OFFSET_MINUTES || 330) * 60000);
+        const [h, m] = officeStart.split(':').map(Number);
+        dayStatus = local.getUTCHours() * 60 + local.getUTCMinutes() > h * 60 + m ? 'LATE' : 'PRESENT';
       }
-
+      const result = await client.query(`INSERT INTO ${this.tableName}
+        (user_id, location_id, date, check_in_time, check_out_time, status, is_secondary, source, raw_zkteco, sessions)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+        ON CONFLICT (user_id, location_id, date) DO UPDATE SET
+          check_in_time = EXCLUDED.check_in_time, check_out_time = EXCLUDED.check_out_time,
+          sessions = EXCLUDED.sessions, status = EXCLUDED.status, is_secondary = EXCLUDED.is_secondary,
+          source = EXCLUDED.source, raw_zkteco = EXCLUDED.raw_zkteco, updated_at = NOW() RETURNING *`,
+        [userId, locationId, dateKey, firstIn, lastOut, dayStatus, isSecondary, source, raw || {}, JSON.stringify(sessions)]);
       await client.query('COMMIT');
       return result.rows[0];
-    } catch (err) {
-      await client.query('ROLLBACK').catch(() => null);
-      throw err;
-    } finally {
-      client.release();
-    }
+    } catch (err) { await client.query('ROLLBACK').catch(() => null); throw err; }
+    finally { client.release(); }
   }
 
   /**

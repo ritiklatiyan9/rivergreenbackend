@@ -12,10 +12,16 @@ const DEFAULT_DEBOUNCE_MS = 10_000;
 // Configured timezone offset in minutes (default IST = +05:30 = 330 min).
 const TZ_OFFSET_MIN = parseInt(process.env.ZKTECO_TZ_OFFSET_MINUTES || '330', 10);
 
-const toDateKey = (d) => {
+const toDateKey = (d, location = {}) => {
   // Shift to configured timezone before extracting the calendar date so the
   // date bucket matches the device's local day, not the server's.
   const local = new Date(d.getTime() + TZ_OFFSET_MIN * 60_000);
+  if (location.office_start_time && location.office_end_time) {
+    const [sh, sm] = String(location.office_start_time).split(':').map(Number);
+    const [eh, em] = String(location.office_end_time).split(':').map(Number);
+    const minute = local.getUTCHours() * 60 + local.getUTCMinutes();
+    if (eh * 60 + em < sh * 60 + sm && minute <= eh * 60 + em) local.setUTCDate(local.getUTCDate() - 1);
+  }
   const yyyy = local.getUTCFullYear();
   const mm = String(local.getUTCMonth() + 1).padStart(2, '0');
   const dd = String(local.getUTCDate()).padStart(2, '0');

@@ -35,12 +35,20 @@ const canMutateFollowup = async (followup, user) => {
 // Falls back to a DB lookup only for ADMIN/OWNER who need a site_id
 // but somehow don't have one on the token (edge case).
 // ============================================================
-const getScopeFilters = async (user) => {
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const NO_MATCH_ID = '00000000-0000-0000-0000-000000000000';
+
+export const getScopeFilters = async (user, query = {}) => {
     if (!user.site_id) return null;
 
     const filters = { siteId: user.site_id };
     if (user.role === 'AGENT' || user.role === 'TEAM_HEAD') {
+        // Own follow-ups only; an ?assigned_to cannot widen this.
         filters.assignedTo = user.id;
+    } else if (query.assigned_to && query.assigned_to !== 'ALL') {
+        // assigned_to is a UUID column, so a malformed value has to match
+        // nothing rather than fail the query.
+        filters.assignedTo = UUID_PATTERN.test(query.assigned_to) ? query.assigned_to : NO_MATCH_ID;
     }
     return filters;
 };
@@ -95,7 +103,7 @@ export const createFollowup = asyncHandler(async (req, res) => {
 // GET FOLLOWUPS (paginated, role-scoped)
 // ============================================================
 export const getFollowups = asyncHandler(async (req, res) => {
-    const scope = await getScopeFilters(req.user);
+    const scope = await getScopeFilters(req.user, req.query);
     if (!scope) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
@@ -120,7 +128,7 @@ export const getFollowups = asyncHandler(async (req, res) => {
 // GET SCHEDULED FOLLOWUPS
 // ============================================================
 export const getScheduledFollowups = asyncHandler(async (req, res) => {
-    const scope = await getScopeFilters(req.user);
+    const scope = await getScopeFilters(req.user, req.query);
     if (!scope) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
@@ -142,7 +150,7 @@ export const getScheduledFollowups = asyncHandler(async (req, res) => {
 // GET MISSED FOLLOWUPS
 // ============================================================
 export const getMissedFollowups = asyncHandler(async (req, res) => {
-    const scope = await getScopeFilters(req.user);
+    const scope = await getScopeFilters(req.user, req.query);
     if (!scope) {
         return res.status(404).json({ success: false, message: 'No site assigned' });
     }
@@ -288,7 +296,7 @@ export const escalateFollowup = asyncHandler(async (req, res) => {
 // GET REMINDERS — unified followups + uncontacted leads, paginated
 // ============================================================
 export const getReminders = asyncHandler(async (req, res) => {
-    const scope = await getScopeFilters(req.user);
+    const scope = await getScopeFilters(req.user, req.query);
     if (!scope) return res.status(404).json({ success: false, message: 'No site assigned' });
 
     const { filter = 'all', search, page = 1, limit = 30 } = req.query;

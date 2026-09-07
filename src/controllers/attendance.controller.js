@@ -23,7 +23,7 @@ export const getActiveLocations = asyncHandler(async (req, res) => {
 export const createLocation = asyncHandler(async (req, res) => {
   const {
     name, latitude, longitude, radius_meters, office_start_time, office_end_time,
-    zkteco_enabled, zkteco_ip, zkteco_port, zkteco_device_id, zkteco_serial,
+    zkteco_enabled, zkteco_ip, zkteco_port, zkteco_device_id, zkteco_serial, zkteco_punch_mode,
   } = req.body;
   if (!name || latitude == null || longitude == null) {
     return res.status(400).json({ success: false, message: 'Name, latitude, and longitude are required' });
@@ -31,7 +31,9 @@ export const createLocation = asyncHandler(async (req, res) => {
   if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
     return res.status(400).json({ success: false, message: 'Invalid coordinates' });
   }
+  if (zkteco_punch_mode && !['AUTO', 'DEVICE'].includes(zkteco_punch_mode)) return res.status(400).json({ success: false, message: 'Invalid punch mode' });
   const payload = {
+    zkteco_punch_mode: zkteco_punch_mode || 'AUTO',
     name,
     latitude: parseFloat(latitude),
     longitude: parseFloat(longitude),
@@ -56,13 +58,17 @@ export const updateLocation = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const {
     name, latitude, longitude, radius_meters, is_active, office_start_time, office_end_time,
-    zkteco_enabled, zkteco_ip, zkteco_port, zkteco_device_id, zkteco_serial,
+    zkteco_enabled, zkteco_ip, zkteco_port, zkteco_device_id, zkteco_serial, zkteco_punch_mode,
   } = req.body;
 
   const existing = await attendanceLocationModel.findById(id, pool);
   if (!existing) return res.status(404).json({ success: false, message: 'Location not found' });
 
   const updates = {};
+  if (zkteco_punch_mode !== undefined) {
+    if (!['AUTO', 'DEVICE'].includes(zkteco_punch_mode)) return res.status(400).json({ success: false, message: 'Invalid punch mode' });
+    updates.zkteco_punch_mode = zkteco_punch_mode;
+  }
   if (name !== undefined) updates.name = name;
   if (latitude !== undefined) {
     if (latitude < -90 || latitude > 90) return res.status(400).json({ success: false, message: 'Invalid latitude' });
@@ -134,8 +140,8 @@ export const getMyToday = asyncHandler(async (req, res) => {
 export const getMyHistory = asyncHandler(async (req, res) => {
   const { page, limit, startDate, endDate } = req.query;
   const data = await attendanceRecordModel.findByUser(req.user.id, {
-    page: parseInt(page) || 1,
-    limit: parseInt(limit) || 20,
+    page: Math.max(1, parseInt(page) || 1),
+    limit: Math.min(200, Math.max(1, parseInt(limit) || 25)),
     startDate,
     endDate,
   }, pool);
@@ -157,16 +163,24 @@ export const getMyMonthlySummary = asyncHandler(async (req, res) => {
 
 /** GET /api/attendance/records — all records with filters */
 export const getAllRecords = asyncHandler(async (req, res) => {
-  const { page, limit, date, startDate, endDate, userId, locationId, status } = req.query;
+  const { page, limit, date, startDate, endDate, userId, locationId, status, search } = req.query;
+  const validDate = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)
+    && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value;
+  if ([date, startDate, endDate].some(value => value !== undefined && !validDate(value))
+      || (startDate && endDate && startDate > endDate)
+      || (status && !['PRESENT', 'LATE', 'HALF_DAY', 'ABSENT'].includes(status))) {
+    return res.status(400).json({ success: false, message: 'Invalid attendance date range or status' });
+  }
   const data = await attendanceRecordModel.findAllRecords({
-    page: parseInt(page) || 1,
-    limit: parseInt(limit) || 20,
+    page: Math.max(1, parseInt(page) || 1),
+    limit: Math.min(200, Math.max(1, parseInt(limit) || 25)),
     date,
     startDate,
     endDate,
     userId,
     locationId,
     status,
+    search: typeof search === 'string' ? search.slice(0, 200) : undefined,
   }, pool);
   res.json({ success: true, ...data });
 });
@@ -188,7 +202,7 @@ export const getDailyStats = asyncHandler(async (req, res) => {
     stats: {
       ...stats,
       total_users: totalUsers,
-      total_absent: totalUsers - parseInt(stats.total_present || 0),
+      total_absent: Math.max(0, totalUsers - parseInt(stats.total_present || 0)),
       date,
     },
   });

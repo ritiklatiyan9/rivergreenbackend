@@ -1,272 +1,118 @@
-// Salary computation: pure function over (settings, salary, attendance, leaves).
-// Reads-only — DB queries happen in the controller; this service is testable
-// without a database. Returns the day-by-day breakdown the UI uses for the
-// calendar, plus the aggregate suggestion the salary table consumes.
+// One calculation for HR calendars, payroll review and immutable payment snapshots.
+const round2 = n => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+const dateKey = value => value instanceof Date
+  ? `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`
+  : String(value || '').slice(0, 10);
+const istDate = value => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(value));
 
-const HOLIDAY_KEY = 'HOLIDAY';
-const WEEKOFF_KEY = 'WEEK_OFF';
-const PAID_LEAVE  = 'PAID_LEAVE';
-const HALF_LEAVE  = 'HALF_PAID_LEAVE';
-const UNPAID_LEAVE = 'UNPAID_LEAVE';
-const PRESENT     = 'PRESENT';
-const LATE        = 'LATE';
-const HALF_DAY    = 'HALF_DAY';
-const ABSENT      = 'ABSENT';
-
-// JS getDay(): 0=Sun..6=Sat. We use ISO 1=Mon..7=Sun in working_days.
-const isoDow = (d) => {
-  const js = d.getDay();
-  return js === 0 ? 7 : js;
-};
-
-const ymd = (d) => {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${dd}`;
-};
-
-// pg returns DATE columns as JS Date objects representing local-midnight in
-// the server's tz; plain `String(date)` produces "Sat May 10 2026 …" which
-// breaks YYYY-MM-DD matching. Use the local components instead — those
-// preserve the actual stored calendar date regardless of server tz.
-const toDateKey = (v) => {
-  if (!v) return null;
-  if (v instanceof Date) return ymd(v);
-  const s = String(v);
-  // ISO-ish string: take the YYYY-MM-DD prefix verbatim.
-  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
-  // Fall back to parsing.
-  const parsed = new Date(s);
-  if (!Number.isNaN(parsed.getTime())) return ymd(parsed);
-  return s.slice(0, 10);
-};
-
-const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
-
-/**
- * @param {Object} args
- * @param {string} args.userId
- * @param {number} args.year                 - 4-digit
- * @param {number} args.month                - 1..12
- * @param {Object} args.hrSettings           - row from site_hr_settings
- * @param {number} args.monthlySalary        - active monthly_salary or 0
- * @param {Array}  args.attendance           - rows from attendance_records (date, status, check_in_time, check_out_time, is_secondary)
- * @param {Array}  args.leaves               - rows from hr_leave_records (leave_date, leave_type, reason)
- * @param {string} [args.joinedAt]           - YYYY-MM-DD; days before this don't count as working
- */
-export function computeMonthlySalary({
-  userId,
-  year,
-  month,
-  hrSettings,
-  monthlySalary,
-  attendance = [],
-  leaves = [],
-  joinedAt = null,
-}) {
-  if (!hrSettings) {
-    throw new Error('hrSettings is required');
-  }
-
-  const workingDays = Array.isArray(hrSettings.working_days) ? hrSettings.working_days : [1, 2, 3, 4, 5, 6];
-  const paidLeaveAllowance = Number(hrSettings.paid_leaves_per_month ?? 2);
-
-  const holidaysList = Array.isArray(hrSettings.holidays) ? hrSettings.holidays : [];
-  const holidayMap = new Map();
-  for (const h of holidaysList) {
-    if (h && h.date) holidayMap.set(String(h.date).slice(0, 10), h.name || 'Holiday');
-  }
-
-  // Index attendance by date string. Prefer the primary (is_secondary=false)
-  // record; fall back to a secondary one only if no primary exists.
-  const attMap = new Map();
-  for (const r of attendance) {
-    const key = toDateKey(r.date);
-    if (!key) continue;
-    const existing = attMap.get(key);
-    if (!existing || (existing.is_secondary && !r.is_secondary)) {
-      attMap.set(key, r);
+export function confirmedWork(records, now = Date.now()) {
+  const intervals = [];
+  let review = false;
+  for (const record of records) {
+    const sessions = Array.isArray(record.sessions) && record.sessions.length ? record.sessions
+      : record.check_in_time ? [{ in: record.check_in_time, out: record.check_out_time }] : [];
+    for (const s of sessions) {
+      const start = s.in ? Date.parse(s.in) : NaN;
+      const end = s.out ? Date.parse(s.out) : NaN;
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end < start || end > now || s.auto_closed) { review = true; continue; }
+      intervals.push([Math.floor(start / 60000), Math.floor(end / 60000)]);
     }
   }
-
-  // Index leaves by date.
-  const leaveMap = new Map();
-  for (const l of leaves) {
-    const key = toDateKey(l.leave_date);
-    if (key) leaveMap.set(key, l);
+  intervals.sort((a, b) => a[0] - b[0]);
+  let minutes = 0, lastEnd = -Infinity;
+  for (const [start, end] of intervals) {
+    // Visits at overlapping locations count once.
+    minutes += Math.max(0, end - Math.max(start, lastEnd));
+    lastEnd = Math.max(lastEnd, end);
   }
+  return { hours: minutes / 60, review };
+}
 
-  const joinDate = joinedAt ? new Date(`${String(joinedAt).slice(0, 10)}T00:00:00`) : null;
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-
-  const daysInMonth = new Date(year, month, 0).getDate();
+export function computeMonthlySalary({ userId, year, month, hrSettings, monthlySalary, attendance = [], leaves = [], joinedAt = null, salaryHistory = [], now = Date.now() }) {
+  if (!hrSettings) throw new Error('hrSettings is required');
+  const mode = hrSettings.salary_basis === 'ATTENDANCE' ? 'ATTENDANCE' : 'TIME';
+  const workingDays = hrSettings.working_days ?? [1, 2, 3, 4, 5, 6];
+  const workingHours = Number(hrSettings.working_hours) > 0 ? Number(hrSettings.working_hours) : 9;
+  const allowance = Math.max(0, Number(hrSettings.paid_leaves_per_month ?? 2));
+  const holidays = new Map((hrSettings.holidays || []).map(h => [dateKey(h.date), h.name]));
+  const today = istDate(now);
+  const joined = joinedAt ? dateKey(joinedAt) : null;
+  const days = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const attByDate = new Map();
+  for (const r of attendance) { const key = dateKey(r.date); if (!attByDate.has(key)) attByDate.set(key, []); attByDate.get(key).push(r); }
+  const leaveByDate = new Map(leaves.map(l => [dateKey(l.leave_date), l]));
+  const history = [...salaryHistory].sort((a, b) => dateKey(b.effective_from).localeCompare(dateKey(a.effective_from)));
+  let working = 0, present = 0, late = 0, half = 0, absent = 0, paidUsed = 0, paidRequested = 0, halfPaid = 0, unpaid = 0, weekoffs = 0, holidayCount = 0;
+  let payableDays = 0, workedHours = 0, expectedHours = 0, reviewDays = 0, suggested = 0, gross = 0;
   const breakdown = [];
-
-  let totalWorkingDays = 0;
-  let presentDays = 0;
-  let lateDays = 0;
-  let halfDays = 0;
-  let absentDays = 0;
-  let holidaysCount = 0;
-  let weekoffCount = 0;
-  let paidLeavesUsed = 0;        // capped at allowance for the calc
-  let paidLeavesRequested = 0;   // raw count (UI shows "X over allowance")
-  let halfPaidLeaves = 0;
-  let unpaidLeaves = 0;
-  let payableDays = 0;
-
-  for (let day = 1; day <= daysInMonth; day++) {
-    const date = new Date(year, month - 1, day);
-    const key = ymd(date);
-    const dow = isoDow(date);
-    const isFutureDay = date > today;
-    const beforeJoin = joinDate ? date < joinDate : false;
-
-    const isHoliday = holidayMap.has(key);
-    const isWorkingDow = workingDays.includes(dow);
-    const isWeekOff = !isWorkingDow;
-    const att = attMap.get(key) || null;
-    const lv = leaveMap.get(key) || null;
-
-    let status = null;
-    let payable = 0;          // 0 | 0.5 | 1
-    let counts = true;        // does this day affect totalWorkingDays?
-
-    if (beforeJoin) {
-      status = 'BEFORE_JOIN';
-      counts = false;
-    } else if (isHoliday || isWeekOff) {
-      // Paid regardless of attendance. Holidays falling on a working DOW
-      // reduce the divisor (employee shouldn't be paid less because the
-      // company gave a holiday).
-      payable = 1;
-      counts = false;
-      if (isHoliday) holidaysCount += 1; else weekoffCount += 1;
-
-      // If the user actually came in on a week-off / holiday, surface that
-      // in the present/late/half counters AND mark the cell with a distinct
-      // status so the calendar can show the extra-effort visually.
-      if (att && att.status !== 'ABSENT') {
-        if (att.status === 'HALF_DAY') halfDays += 1;
-        else if (att.status === 'LATE') { lateDays += 1; presentDays += 1; }
-        else presentDays += 1;
-        status = isHoliday ? 'HOLIDAY_WORKED' : 'WEEK_OFF_WORKED';
-      } else {
-        status = isHoliday ? HOLIDAY_KEY : WEEKOFF_KEY;
-      }
-    } else {
-      // Working day. Decide via leave override > attendance.
-      totalWorkingDays += 1;
-      counts = true;
-
-      if (lv) {
-        if (lv.leave_type === 'PAID') {
-          paidLeavesRequested += 1;
-          if (paidLeavesUsed < paidLeaveAllowance) {
-            paidLeavesUsed += 1;
-            status = PAID_LEAVE;
-            payable = 1;
-          } else {
-            // Allowance exhausted — auto-treat as unpaid for the calc.
-            status = `${PAID_LEAVE}_OVER`;
-            unpaidLeaves += 1;
-            payable = 0;
-          }
-        } else if (lv.leave_type === 'HALF_PAID') {
-          halfPaidLeaves += 1;
-          status = HALF_LEAVE;
-          payable = 0.5;
-        } else {
-          unpaidLeaves += 1;
-          status = UNPAID_LEAVE;
-          payable = 0;
-        }
-      } else if (att) {
-        if (att.status === 'HALF_DAY') {
-          halfDays += 1;
-          status = HALF_DAY;
-          payable = 0.5;
-        } else if (att.status === 'LATE') {
-          lateDays += 1;
-          presentDays += 1;
-          status = LATE;
-          payable = 1;
-        } else if (att.status === 'PRESENT') {
-          presentDays += 1;
-          status = PRESENT;
-          payable = 1;
-        } else if (att.status === 'ABSENT') {
-          absentDays += 1;
-          status = ABSENT;
-          payable = 0;
-        } else {
-          presentDays += 1;
-          status = PRESENT;
-          payable = 1;
-        }
-      } else {
-        // No record on a working day:
-        //   future day → not absent, just upcoming.
-        //   past/today → absent.
-        if (isFutureDay) {
-          status = 'UPCOMING';
-          payable = 0;
-          // Don't count future days towards absent — but still in working days
-          // so the divisor reflects the full month policy.
-        } else {
-          absentDays += 1;
-          status = ABSENT;
-          payable = 0;
-        }
-      }
+  for (let day = 1; day <= days; day++) {
+    const key = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    const dow = new Date(`${key}T12:00:00Z`).getUTCDay() || 7;
+    const isHoliday = holidays.has(key), isWeekOff = !workingDays.includes(dow);
+    const isWork = !isHoliday && !isWeekOff;
+    const beforeJoin = joined && key < joined;
+    const future = key > today;
+    const rates = history.find(h => dateKey(h.effective_from) <= key && (!h.effective_to || dateKey(h.effective_to) >= key));
+    const salary = history.length ? Number(rates?.monthly_salary || 0) : Number(monthlySalary || 0);
+    const rate = salary / days;
+    const records = attByDate.get(key) || [];
+    const att = records.find(r => !r.is_secondary) || records[0];
+    const work = confirmedWork(records, now);
+    const lv = leaveByDate.get(key);
+    let status, payable = 0;
+    if (isWork && !beforeJoin) working++;
+    if (beforeJoin) status = 'BEFORE_JOIN';
+    else if (future) status = 'UPCOMING';
+    else {
+      gross += rate;
+      workedHours += work.hours;
+      if (work.review) reviewDays++;
+      if (isWork) expectedHours += workingHours;
+      if (!isWork) {
+        payable = 1;
+        if (isHoliday) holidayCount++; else weekoffs++;
+        status = isHoliday ? 'HOLIDAY' : 'WEEK_OFF';
+        if (work.hours > 0) status += '_WORKED';
+      } else if (lv) {
+        if (lv.leave_type === 'PAID' || lv.leave_type === 'HALF_PAID') {
+          const requested = lv.leave_type === 'HALF_PAID' ? 0.5 : 1;
+          paidRequested += requested;
+          const granted = Math.min(requested, Math.max(0, allowance - paidUsed));
+          paidUsed += granted; unpaid += requested - granted;
+          if (requested === 0.5) halfPaid++;
+          payable = granted;
+          status = granted === 0 ? 'PAID_LEAVE_OVER' : requested === 0.5 ? 'HALF_PAID_LEAVE' : 'PAID_LEAVE';
+          // A half-paid leave may accompany a worked half-day, capped at a day.
+          if (requested === 0.5) payable += Math.min(0.5, work.hours / workingHours);
+        } else { status = 'UNPAID_LEAVE'; unpaid++; }
+      } else if (att && att.status !== 'ABSENT') {
+        payable = mode === 'TIME' ? Math.min(1, work.hours / workingHours) : att.status === 'HALF_DAY' ? 0.5 : 1;
+        // Unknown or incomplete scans never earn a full day by default.
+        if (!['PRESENT', 'LATE', 'HALF_DAY'].includes(att.status)) payable = 0;
+        status = payable === 0 ? 'INCOMPLETE' : payable < 1 ? 'HALF_DAY' : att.status === 'LATE' ? 'LATE' : 'PRESENT';
+        if (att.status === 'LATE') late++;
+        if (payable >= 1) present++; else if (payable > 0) half++;
+      } else { status = 'ABSENT'; absent++; }
     }
-
-    payableDays += payable;
-
-    breakdown.push({
-      date: key,
-      dow,                          // ISO 1..7
-      status,                       // PRESENT | LATE | HALF_DAY | ABSENT | HOLIDAY | WEEK_OFF | PAID_LEAVE | HALF_PAID_LEAVE | UNPAID_LEAVE | PAID_LEAVE_OVER | UPCOMING | BEFORE_JOIN
-      payable,
-      counts_in_working: counts,
-      check_in: att?.check_in_time || null,
-      check_out: att?.check_out_time || null,
-      hours: (att?.check_in_time && att?.check_out_time)
-        ? round2((new Date(att.check_out_time) - new Date(att.check_in_time)) / 36e5)
-        : null,
-      holiday_name: isHoliday ? holidayMap.get(key) : null,
-      leave_id: lv?.id || null,
-      leave_type: lv?.leave_type || null,
-      leave_reason: lv?.reason || null,
-    });
+    payable = Math.min(1, payable);
+    const earned = rate * payable;
+    suggested += earned; payableDays += payable;
+    const starts = records.flatMap(r => Array.isArray(r.sessions) && r.sessions.length ? r.sessions.map(s => s.in).filter(Boolean) : [r.check_in_time].filter(Boolean)).sort();
+    const ends = records.flatMap(r => Array.isArray(r.sessions) && r.sessions.length ? r.sessions.map(s => s.out).filter(Boolean) : [r.check_out_time].filter(Boolean)).sort();
+    breakdown.push({ date: key, dow, status, payable: round2(payable), counts_in_working: isWork && !beforeJoin,
+      check_in: starts[0] || null, check_out: ends.at(-1) || null, hours: round2(work.hours), needs_review: work.review,
+      expected_hours: isWork && !beforeJoin && !future ? workingHours : 0,
+      monthly_salary: salary, day_rate: round2(rate), earned_amount: round2(earned),
+      deduction: round2(!beforeJoin && !future ? rate - earned : 0),
+      holiday_name: holidays.get(key) || null, leave_id: lv?.id || null, leave_type: lv?.leave_type || null, leave_reason: lv?.reason || null });
   }
-
-  const perDayRate = totalWorkingDays > 0 ? Number(monthlySalary) / totalWorkingDays : 0;
-  const suggestedAmount = round2(perDayRate * payableDays);
-
-  return {
-    user_id: userId,
-    year,
-    month,
-    monthly_salary: Number(monthlySalary) || 0,
-    paid_leaves_allowance: paidLeaveAllowance,
-    paid_leaves_requested: paidLeavesRequested,
-    paid_leaves_used: paidLeavesUsed,
-    paid_leaves_over_allowance: Math.max(0, paidLeavesRequested - paidLeavesUsed),
-    half_paid_leaves: halfPaidLeaves,
-    unpaid_leaves: unpaidLeaves,
-    holidays_count: holidaysCount,
-    weekoff_count: weekoffCount,
-    total_working_days: totalWorkingDays,
-    present_days: presentDays,
-    late_days: lateDays,
-    half_days: halfDays,
-    absent_days: absentDays,
-    payable_days: round2(payableDays),
-    per_day_rate: round2(perDayRate),
-    suggested_amount: suggestedAmount,
-    breakdown,
-  };
+  return { user_id: userId, year, month, monthly_salary: Number(monthlySalary) || 0,
+    calculation_version: 2, calculation_basis: mode, as_of: today, days_in_month: days, working_hours_per_day: workingHours,
+    paid_leaves_allowance: allowance, paid_leaves_requested: paidRequested, paid_leaves_used: paidUsed,
+    paid_leaves_over_allowance: round2(Math.max(0, paidRequested - paidUsed)), half_paid_leaves: halfPaid, unpaid_leaves: unpaid,
+    holidays_count: holidayCount, weekoff_count: weekoffs, total_working_days: working,
+    present_days: present, late_days: late, half_days: half, absent_days: absent,
+    payable_days: round2(payableDays), per_day_rate: round2(Number(monthlySalary || 0) / days),
+    worked_hours: round2(workedHours), expected_hours: round2(expectedHours), review_days: reviewDays,
+    gross_amount: round2(gross), deduction_amount: round2(gross - suggested), suggested_amount: round2(suggested), breakdown };
 }

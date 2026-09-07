@@ -1,3 +1,4 @@
+import { pendingPunches } from '../utils/pendingPunches.js';
 // ZKTeco poller — runs in-process on the API server.
 //
 // Loop: every 30s, for each location with zkteco_enabled, pull
@@ -12,7 +13,7 @@
 import pool from '../config/db.js';
 import { emitAttendancePunch } from '../config/socket.js';
 import { fetchAttendances } from '../services/zkteco.service.js';
-import { reducePunches } from '../utils/zktecoPunchReducer.js';
+import { reducePunches, __test__ as punchDates } from '../utils/zktecoPunchReducer.js';
 import { attendanceLocationModel, attendanceRecordModel } from '../models/Attendance.model.js';
 import userModel from '../models/User.model.js';
 import { bustCache } from '../middlewares/cache.middleware.js';
@@ -27,7 +28,14 @@ let lastRunAt = null;
 const log = (...args) => console.log('[zkteco-poller]', ...args);
 const errlog = (...args) => console.error('[zkteco-poller]', ...args);
 
-const pollLocation = async (location) => {
+const pendingLocations = new Map();
+const pollLocation = (location) => {
+  if (pendingLocations.has(location.id)) return pendingLocations.get(location.id);
+  const task = processLocation(location).finally(() => pendingLocations.delete(location.id));
+  pendingLocations.set(location.id, task);
+  return task;
+};
+const processLocation = async (location) => {
   const lastLogId = location.zkteco_last_log_id != null ? Number(location.zkteco_last_log_id) : 0;
   let punches;
   try {
@@ -42,19 +50,21 @@ const pollLocation = async (location) => {
     return { ok: false, error: err.message };
   }
 
-  // Filter to new punches only (logId strictly greater than the watermark).
-  const newPunches = punches.filter((p) => Number(p.logId) > lastLogId);
-  if (newPunches.length === 0) {
-    await attendanceLocationModel.setZktecoSyncStatus(
-      location.id,
-      { lastError: null, syncedAt: new Date() },
-      pool,
-    );
+  const userMap = await userModel.buildZktecoUserMapForLocation(location.id, pool);
+  const times = punches.map(p => p.time.getTime());
+  let newPunches = punches;
+  if (times.length) {
+    const bounds = [location.id, new Date(times.reduce((a, b) => Math.min(a, b), Infinity)), new Date(times.reduce((a, b) => Math.max(a, b), -Infinity))];
+    const [journal, pending] = await Promise.all([
+      pool.query('SELECT user_id, punch_time FROM attendance_punch_events WHERE location_id = $1 AND punch_time BETWEEN $2 AND $3', bounds),
+      pool.query('SELECT zkteco_user_id, punch_time FROM zkteco_unmapped_punches WHERE location_id = $1 AND punch_time BETWEEN $2 AND $3', bounds),
+    ]);
+    newPunches = pendingPunches(punches, userMap, journal.rows, pending.rows);
+  }
+  if (!newPunches.length) {
+    await attendanceLocationModel.setZktecoSyncStatus(location.id, { lastError: null, syncedAt: new Date() }, pool);
     return { ok: true, fetched: punches.length, applied: 0 };
   }
-
-  // Build the user map once per cycle and reduce.
-  const userMap = await userModel.buildZktecoUserMapForLocation(location.id, pool);
   const { upserts, unmapped } = reducePunches(newPunches, location, userMap);
 
   // Persist unmapped first so we never lose them if upserts later fail.
@@ -73,20 +83,24 @@ const pollLocation = async (location) => {
     );
   }
 
-  // Upsert every (user, location, date) bucket.
-  for (const u of upserts) {
+  let applied = 0;
+  for (const punch of [...newPunches].sort((a, b) => a.time - b.time)) {
+    const user = userMap.get(punch.zktecoUserId);
+    if (!user) continue;
     try {
-      const record = await attendanceRecordModel.upsertFromPunch(u, pool);
-      if (record) {
-        emitAttendancePunch(record);
-        // The reducer hands us either a single check-in (checkOut === null)
-        // or a closed in/out pair (checkOut set) — pass the action explicitly
-        // so the notification body says the right verb.
-        const action = u.checkOut ? 'CHECK_OUT' : 'CHECK_IN';
-        notifyAttendancePunch(record, { channel: 'BIOMETRIC_POLL', action });
-      }
+      const record = await attendanceRecordModel.appendBiometricPunch({
+        userId: user.id, locationId: location.id, dateKey: punchDates.toDateKey(punch.time, location),
+        punchTime: punch.time, punchType: punch.type,
+        status: punchDates.isLate(punch.time, location.office_start_time) ? 'LATE' : 'PRESENT',
+        isSecondary: !!(user.primary_site_id && location.site_id && String(user.primary_site_id) !== String(location.site_id)),
+        source: 'BIOMETRIC', raw: punch.raw || {},
+      }, pool);
+      if (record) { applied++; emitAttendancePunch(record); notifyAttendancePunch(record, { channel: 'BIOMETRIC_POLL' }); }
     } catch (err) {
-      errlog(`location ${location.id} user ${u.userId}: upsert failed — ${err.message}`);
+      await attendanceLocationModel.setZktecoSyncStatus(location.id, { lastError: `Retry pending: ${err.message}`, syncedAt: new Date() }, pool);
+      bustCache('cache:*:/api/attendance*').catch(() => null);
+      bustCache('cache:*:/api/hr*').catch(() => null);
+      return { ok: false, applied, error: err.message };
     }
   }
 
@@ -100,9 +114,10 @@ const pollLocation = async (location) => {
 
   if (upserts.length > 0) {
     bustCache('cache:*:/api/attendance*').catch(() => null);
+    bustCache('cache:*:/api/hr*').catch(() => null);
   }
 
-  return { ok: true, fetched: punches.length, applied: upserts.length, unmapped: unmapped.length };
+  return { ok: true, fetched: punches.length, applied, unmapped: unmapped.length };
 };
 
 const tick = async () => {
@@ -113,9 +128,9 @@ const tick = async () => {
     const locations = await attendanceLocationModel.findZktecoEnabled(pool);
     if (locations.length === 0) return;
     // Sequential — keeps DB churn low and avoids hammering all devices at once.
-    for (const loc of locations) {
-      try { await pollLocation(loc); }
-      catch (err) { errlog(`location ${loc.id}: unhandled — ${err.message}`); }
+    // A slow/offline machine must not hold up every other device.
+    for (let i = 0; i < locations.length; i += 4) {
+      await Promise.allSettled(locations.slice(i, i + 4).map(pollLocation));
     }
   } finally {
     isPolling = false;

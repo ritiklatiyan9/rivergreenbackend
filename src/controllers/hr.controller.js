@@ -1,3 +1,4 @@
+import { validateSalaryInput } from '../utils/salaryValidation.js';
 import asyncHandler from '../utils/asyncHandler.js';
 import pool from '../config/db.js';
 import { bustCache } from '../middlewares/cache.middleware.js';
@@ -85,7 +86,7 @@ const sanitizeOverrideInput = (body) => {
     }
   }
   let err = null;
-  err = err || setNullable('working_hours', Number, (n) => Number.isFinite(n) && n >= 0 && n <= 24);
+  err = err || setNullable('working_hours', Number, (n) => Number.isFinite(n) && n > 0 && n <= 24);
   err = err || setNullable('work_start_time', String, (s) => /^\d{2}:\d{2}(:\d{2})?$/.test(s));
   err = err || setNullable('work_end_time', String, (s) => /^\d{2}:\d{2}(:\d{2})?$/.test(s));
   err = err || setNullable('paid_leaves_per_month', (v) => parseInt(v, 10), (n) => Number.isInteger(n) && n >= 0 && n <= 31);
@@ -100,7 +101,7 @@ const sanitizeOverrideInput = (body) => {
 const fetchAttendanceForUserMonth = async (userId, year, month, pool_) => {
   const { start, end } = monthBounds(year, month);
   const r = await pool_.query(
-    `SELECT date, status, check_in_time, check_out_time, is_secondary
+    `SELECT date, status, check_in_time, check_out_time, is_secondary, sessions
      FROM attendance_records
      WHERE user_id = $1 AND date BETWEEN $2 AND $3`,
     [userId, start, end],
@@ -130,7 +131,7 @@ export const updateSettings = asyncHandler(async (req, res) => {
   const {
     working_days, working_hours, work_start_time, work_end_time,
     paid_leaves_per_month, half_day_threshold_hours, late_grace_minutes,
-    holidays,
+    holidays, salary_basis,
   } = req.body;
 
   const updates = { updated_by: req.user.id };
@@ -140,7 +141,14 @@ export const updateSettings = asyncHandler(async (req, res) => {
     }
     updates.working_days = working_days;
   }
-  if (working_hours !== undefined) updates.working_hours = Number(working_hours);
+  if (salary_basis !== undefined) {
+    if (!['TIME', 'ATTENDANCE'].includes(salary_basis)) return res.status(400).json({ success: false, message: 'Invalid salary basis' });
+    updates.salary_basis = salary_basis;
+  }
+  if (working_hours !== undefined) {
+    if (!Number.isFinite(Number(working_hours)) || Number(working_hours) <= 0 || Number(working_hours) > 24) return res.status(400).json({ success: false, message: 'Working hours must be greater than 0 and at most 24' });
+    updates.working_hours = Number(working_hours);
+  }
   if (work_start_time !== undefined) updates.work_start_time = work_start_time;
   if (work_end_time !== undefined) updates.work_end_time = work_end_time;
   if (paid_leaves_per_month !== undefined) updates.paid_leaves_per_month = parseInt(paid_leaves_per_month, 10);
@@ -181,9 +189,8 @@ export const getUserSalary = asyncHandler(async (req, res) => {
 export const updateUserSalary = asyncHandler(async (req, res) => {
   const { userId } = req.params;
   const { monthly_salary, effective_from, joined_at, notes } = req.body;
-  if (monthly_salary === undefined || monthly_salary === null || Number(monthly_salary) < 0) {
-    return res.status(400).json({ success: false, message: 'monthly_salary is required and must be >= 0' });
-  }
+  const validationError = validateSalaryInput(req.body);
+  if (validationError) return res.status(400).json({ success: false, message: validationError });
   const u = await pool.query(`SELECT id, site_id FROM users WHERE id = $1`, [userId]);
   if (!u.rows[0]) return res.status(404).json({ success: false, message: 'User not found' });
   const siteId = u.rows[0].site_id || req.user.site_id;
@@ -219,7 +226,8 @@ export const getAttendanceCalendarBulk = asyncHandler(async (req, res) => {
 
   const usersRes = await pool.query(
     `SELECT u.id, u.name, u.email, u.role, u.profile_photo,
-            us.monthly_salary, us.joined_at
+            us.monthly_salary, us.joined_at,
+            (SELECT COALESCE(jsonb_agg(h ORDER BY h.effective_from), '[]'::jsonb) FROM user_salaries h WHERE h.user_id = u.id) AS salary_history
      FROM users u
      LEFT JOIN user_salaries us ON us.user_id = u.id AND us.effective_to IS NULL
      WHERE u.is_active = true
@@ -235,7 +243,7 @@ export const getAttendanceCalendarBulk = asyncHandler(async (req, res) => {
   const [attRes, lvRes, overrideMap] = userIds.length > 0
     ? await Promise.all([
         pool.query(
-          `SELECT user_id, date, status, check_in_time, check_out_time, is_secondary
+          `SELECT user_id, date, status, check_in_time, check_out_time, is_secondary, sessions
            FROM attendance_records
            WHERE date BETWEEN $1 AND $2 AND user_id = ANY($3::uuid[])`,
           [start, end, userIds],
@@ -272,12 +280,16 @@ export const getAttendanceCalendarBulk = asyncHandler(async (req, res) => {
       attendance: attByUser.get(u.id) || [],
       leaves: lvByUser.get(u.id) || [],
       joinedAt: u.joined_at,
+      salaryHistory: u.salary_history || [],
     });
     return {
       user: { id: u.id, name: u.name, email: u.email, role: u.role, profile_photo: u.profile_photo },
       monthly_salary: u.monthly_salary,
       breakdown: calc.breakdown,
       summary: {
+        calculation_basis: calc.calculation_basis, days_in_month: calc.days_in_month,
+        worked_hours: calc.worked_hours, expected_hours: calc.expected_hours, review_days: calc.review_days,
+        gross_amount: calc.gross_amount, deduction_amount: calc.deduction_amount,
         total_working_days: calc.total_working_days,
         present_days: calc.present_days,
         late_days: calc.late_days,
@@ -320,6 +332,7 @@ export const getAttendanceCalendar = asyncHandler(async (req, res) => {
     attendance,
     leaves,
     joinedAt: active?.joined_at || null,
+    salaryHistory: await userSalaryModel.findHistory(userId, pool),
   });
 
   res.json({
@@ -341,7 +354,7 @@ export const upsertLeave = asyncHandler(async (req, res) => {
   if (!['PAID', 'UNPAID', 'HALF_PAID'].includes(leave_type)) {
     return res.status(400).json({ success: false, message: 'leave_type must be PAID, UNPAID or HALF_PAID' });
   }
-  const u = await pool.query(`SELECT id, site_id FROM users WHERE id = $1`, [user_id]);
+  const u = await pool.query(`SELECT id, site_id, name, email, role FROM users WHERE id = $1`, [user_id]);
   if (!u.rows[0]) return res.status(404).json({ success: false, message: 'User not found' });
   const siteId = u.rows[0].site_id || req.user.site_id;
 
@@ -384,7 +397,8 @@ export const suggestPayrollAll = asyncHandler(async (req, res) => {
   // in the month — but those without a salary will show monthly_salary=0).
   const usersRes = await pool.query(
     `SELECT u.id, u.name, u.email, u.role, u.profile_photo,
-            us.monthly_salary, us.joined_at
+            us.monthly_salary, us.joined_at,
+            (SELECT COALESCE(jsonb_agg(h ORDER BY h.effective_from), '[]'::jsonb) FROM user_salaries h WHERE h.user_id = u.id) AS salary_history
      FROM users u
      LEFT JOIN user_salaries us ON us.user_id = u.id AND us.effective_to IS NULL
      WHERE u.is_active = true
@@ -400,7 +414,7 @@ export const suggestPayrollAll = asyncHandler(async (req, res) => {
   // One round-trip for attendance + leaves + overrides across all users.
   const [attRes, lvRes, payRes, overrideMap] = await Promise.all([
     pool.query(
-      `SELECT user_id, date, status, check_in_time, check_out_time, is_secondary
+      `SELECT user_id, date, status, check_in_time, check_out_time, is_secondary, sessions
        FROM attendance_records
        WHERE date BETWEEN $1 AND $2 AND user_id = ANY($3::uuid[])`,
       [start, end, userIds],
@@ -412,7 +426,7 @@ export const suggestPayrollAll = asyncHandler(async (req, res) => {
       [start, end, userIds],
     ),
     pool.query(
-      `SELECT * FROM salary_payments
+      `SELECT id, user_id, period_year, period_month, amount, status, payment_method, payment_date, transaction_ref FROM salary_payments
        WHERE period_year = $1 AND period_month = $2 AND user_id = ANY($3::uuid[])`,
       [yYm.year, yYm.month, userIds],
     ),
@@ -443,12 +457,16 @@ export const suggestPayrollAll = asyncHandler(async (req, res) => {
       attendance: attByUser.get(u.id) || [],
       leaves: lvByUser.get(u.id) || [],
       joinedAt: u.joined_at,
+      salaryHistory: u.salary_history || [],
     });
     const payment = payByUser.get(u.id) || null;
     return {
       user: { id: u.id, name: u.name, email: u.email, role: u.role, profile_photo: u.profile_photo },
       monthly_salary: u.monthly_salary,
       summary: {
+        calculation_basis: calc.calculation_basis, days_in_month: calc.days_in_month,
+        worked_hours: calc.worked_hours, expected_hours: calc.expected_hours, review_days: calc.review_days,
+        gross_amount: calc.gross_amount, deduction_amount: calc.deduction_amount,
         total_working_days: calc.total_working_days,
         present_days: calc.present_days,
         late_days: calc.late_days,
@@ -491,6 +509,7 @@ export const suggestPayrollUser = asyncHandler(async (req, res) => {
     attendance,
     leaves,
     joinedAt: active?.joined_at || null,
+    salaryHistory: await userSalaryModel.findHistory(userId, pool),
   });
 
   const payment = await salaryPaymentModel.findByPeriod({ userId, year: yYm.year, month: yYm.month }, pool);
@@ -505,19 +524,25 @@ export const recordPayment = asyncHandler(async (req, res) => {
   const {
     user_id, period_year, period_month,
     amount, payment_method, payment_date,
-    transaction_ref, notes, status,
+    transaction_ref, notes, status, adjustment_reason, expected_suggested_amount,
   } = req.body;
 
   if (!user_id || !period_year || !period_month || amount == null) {
     return res.status(400).json({ success: false, message: 'user_id, period_year, period_month and amount are required' });
   }
-  if (Number(amount) < 0) {
+  if (!['number', 'string'].includes(typeof amount) || String(amount).trim() === '' || !Number.isFinite(Number(amount)) || Number(amount) < 0 || Number(amount) > 9999999999.99) {
     return res.status(400).json({ success: false, message: 'amount must be >= 0' });
   }
+  if (payment_method && !['CASH','BANK_TRANSFER','CHEQUE','UPI','CARD','OTHER'].includes(payment_method)) return res.status(400).json({ success: false, message: 'Invalid payment method' });
+  if (status && !['PENDING','COMPLETED','FAILED','CANCELLED'].includes(status)) return res.status(400).json({ success: false, message: 'Invalid payment status' });
+  if (payment_date && (!/^\d{4}-\d{2}-\d{2}$/.test(payment_date) || !Number.isFinite(Date.parse(payment_date)) || new Date(payment_date).toISOString().slice(0, 10) !== payment_date)) return res.status(400).json({ success: false, message: 'Invalid payment date' });
+  if (transaction_ref != null && (typeof transaction_ref !== 'string' || transaction_ref.length > 100)) return res.status(400).json({ success: false, message: 'Transaction reference must be at most 100 characters' });
+  if (notes != null && (typeof notes !== 'string' || notes.length > 1000)) return res.status(400).json({ success: false, message: 'Notes must be at most 1000 characters' });
+  if (adjustment_reason != null && (typeof adjustment_reason !== 'string' || adjustment_reason.length > 1000)) return res.status(400).json({ success: false, message: 'Invalid adjustment reason' });
   const yYm = validYearMonth(period_year, period_month);
   if (!yYm) return res.status(400).json({ success: false, message: 'invalid period_year/period_month' });
 
-  const u = await pool.query(`SELECT id, site_id FROM users WHERE id = $1`, [user_id]);
+  const u = await pool.query(`SELECT id, site_id, name, email, role FROM users WHERE id = $1`, [user_id]);
   if (!u.rows[0]) return res.status(404).json({ success: false, message: 'User not found' });
   const siteId = u.rows[0].site_id || req.user.site_id;
 
@@ -538,10 +563,20 @@ export const recordPayment = asyncHandler(async (req, res) => {
     userId: user_id, year: yYm.year, month: yYm.month,
     hrSettings: effectiveSettings, monthlySalary: active?.monthly_salary || 0,
     attendance, leaves, joinedAt: active?.joined_at || null,
+    salaryHistory: await userSalaryModel.findHistory(user_id, pool),
   });
 
+  if (!active) return res.status(400).json({ success: false, message: 'Configure the employee salary in HR first' });
+  if (expected_suggested_amount != null && (!Number.isFinite(Number(expected_suggested_amount)) || Math.abs(Number(expected_suggested_amount) - calc.suggested_amount) > 0.01)) {
+    return res.status(409).json({ success: false, message: 'Attendance or salary changed. Reopen payment review to use the latest calculation.' });
+  }
+  const adjustment = Math.round((Number(amount) - calc.suggested_amount) * 100) / 100;
+  if (Math.abs(adjustment) >= 0.01 && !adjustment_reason?.trim()) return res.status(400).json({ success: false, message: 'An adjustment reason is required when changing the suggested salary' });
+  const company = await pool.query('SELECT name FROM sites WHERE id = $1', [siteId]);
   const row = await salaryPaymentModel.create({
     user_id,
+    calculation_snapshot: JSON.stringify({ ...calc, policy: effectiveSettings, employee: u.rows[0], company_name: company.rows[0]?.name || 'HR Management', adjustment, final_amount: Number(amount), captured_at: new Date().toISOString() }),
+    adjustment_reason: adjustment_reason?.trim() || null,
     site_id: siteId,
     period_year: yYm.year,
     period_month: yYm.month,

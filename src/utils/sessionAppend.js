@@ -71,3 +71,31 @@ export function denormalizeSessions(sessions) {
   const lastOut = completed.length > 0 ? completed[completed.length - 1].out : null;
   return { firstIn, lastOut };
 }
+
+// Rebuild from durable raw events so delayed/offline uploads produce the same
+// sessions as chronological delivery. AUTO supports machines that label every
+// scan as IN; DEVICE honors configured IN/OUT and break direction codes.
+export function rebuildSessions(events, { mode = 'AUTO', debounceMs = 10000 } = {}) {
+  const ordered = events.map(e => ({ time: new Date(e.punch_time).getTime(), type: e.punch_type == null ? null : Number(e.punch_type), seeded: !!e.raw?.seeded }))
+    .filter(e => Number.isFinite(e.time)).sort((a, b) => a.time - b.time);
+  const sessions = [];
+  let accepted = null;
+  for (const event of ordered) {
+    const direction = event.seeded || mode === 'DEVICE'
+      ? [0, 3, 4].includes(event.type) ? 'IN' : [1, 2, 5].includes(event.type) ? 'OUT' : 'AUTO' : 'AUTO';
+    if (accepted && event.time - accepted.time < debounceMs && (direction === accepted.direction || direction === 'AUTO')) continue;
+    accepted = { ...event, direction };
+    const time = new Date(event.time).toISOString();
+    const open = sessions.at(-1)?.in && !sessions.at(-1).out ? sessions.at(-1) : null;
+    if (direction === 'OUT') {
+      if (open) open.out = time;
+      else if (!sessions.length) sessions.push({ in: null, out: time, needs_review: true });
+      // Repeated OUT does not turn into a false check-in.
+    } else if (direction === 'IN') {
+      if (!open) sessions.push({ in: time, out: null });
+      // Repeated IN leaves the original check-in unchanged.
+    } else if (open) open.out = time;
+    else sessions.push({ in: time, out: null });
+  }
+  return sessions;
+}

@@ -85,6 +85,11 @@ export const fetchAttendances = async (location, { timeoutMs } = {}) => {
       await withTimeout(connect(client), timeoutMs || DEFAULT_TIMEOUT_MS, 'connect');
       const res = await withTimeout(client.getAttendances(), 30_000, 'getAttendances');
       const rows = Array.isArray(res?.data) ? res.data : [];
+      for (const r of rows) {
+        if (!(r.recordTime || r.timestamp) || !Number.isFinite(new Date(r.recordTime || r.timestamp).getTime())) {
+          throw new Error('Device returned an invalid punch timestamp; sync will retry without inventing attendance');
+        }
+      }
       return rows.map((r, idx) => ({
         uid: r.userSn ?? r.uid ?? null,
         zktecoUserId: Number(r.deviceUserId ?? r.userId ?? r.id),
