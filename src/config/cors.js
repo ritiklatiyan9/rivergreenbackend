@@ -19,6 +19,13 @@ const nativeAppOrigins = new Set([
   'https://localhost',
 ]);
 
+// Local Vite clients also connect to the deployed production API.
+const localWebOrigins = new Set([
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'http://[::1]:5173',
+]);
+
 const normalizeOrigin = (origin) => String(origin || '').trim().replace(/\/$/, '');
 
 const isDevelopmentOrigin = (origin) => {
@@ -35,7 +42,8 @@ const isDevelopmentOrigin = (origin) => {
 
 /**
  * Native Capacitor requests have a stable localhost origin. Browser clients
- * must be listed explicitly in CORS_ORIGINS in production (comma separated).
+ * on Vite's local port 5173 are also allowed. Other browser clients must be
+ * listed explicitly in CORS_ORIGINS in production (comma separated).
  * Requests without an Origin header are allowed for Android/native, health
  * checks, cron jobs, and trusted server-to-server callers.
  */
@@ -46,6 +54,7 @@ export const isOriginAllowed = (origin) => {
   return (process.env.NODE_ENV !== 'production' && configuredOrigins.has('*'))
     || configuredOrigins.has(normalized)
     || nativeAppOrigins.has(normalized)
+    || localWebOrigins.has(normalized)
     || isDevelopmentOrigin(normalized);
 };
 

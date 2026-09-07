@@ -112,6 +112,11 @@ test('production CORS is explicit while Capacitor origin remains allowed', { con
 
   assert.equal(cors.isOriginAllowed('https://sales.example.com'), true);
   assert.equal(cors.isOriginAllowed('capacitor://localhost'), true);
+  assert.equal(cors.isOriginAllowed('http://localhost:5173'), true);
+  assert.equal(cors.isOriginAllowed('http://127.0.0.1:5173'), true);
+  assert.equal(cors.isOriginAllowed('http://[::1]:5173'), true);
+  assert.equal(cors.isOriginAllowed('http://localhost:5174'), false);
+  assert.equal(cors.isOriginAllowed('http://localhost.attacker.example:5173'), false);
   assert.equal(cors.isOriginAllowed('https://attacker.example'), false);
   assert.equal(cors.isOriginAllowed(undefined), true);
 
